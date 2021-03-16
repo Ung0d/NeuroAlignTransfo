@@ -12,11 +12,14 @@ import Data as data
 # The code is based on https://www.tensorflow.org/tutorials/text/transformer.
 # The main idea is to transform each sequence individually to the
 # sequence of columns and aggregate thereafter over the number of sequences. 
-# This procedure is repeated over multiple iterations.
+# This procedure is repeated over multiple iterations to allow each input sequence to
+# reason about its own contribution to the consensus relative to all other sequences.
+# Eventually, the model outputs aggregated columns and attention weights (i.e. a number between 
+# 0 and 1 for each pair of residuum and column)
 
 
 #a mask for a 3D tensor where the 2nd dimension is the spatial/temporal dimension
-#mask is 1 if and only if a position is non padded (and thus attends)
+#mask is 1 if and only if a position is non padded (and thus can attend)
 #a padded position is a sequence position where the last dimension is all zero
 def make_padding_mask(sequences):
     mask = tf.math.equal(sequences, 0)
@@ -143,8 +146,11 @@ def positional_encoding(position, dim):
                           dim)
     angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
     angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-    angle_rads = np.roll(angle_rads, shift=1, axis=0)
-    angle_rads[0] = 0
+    #shift by 1 to the right and set the first index to 0 (i.e. it has no particular position encoded)
+    #the first index will correspond to the gap dummy, a generic gap that functions as a positionless
+    #sequence member to which columns can attent if they have no corresponding amino acid
+    angle_rads = np.roll(angle_rads, shift=1, axis=0) 
+    angle_rads[0] = 0 
     return tf.expand_dims(tf.cast(angle_rads, dtype=tf.float32), 0)
 
 #encodes the input sequences (i.e. transform input_dim to embedding_dim)
@@ -155,7 +161,9 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
         self.matrix = self.add_weight(shape=(input_dim, embedding_dim), name='embedding', initializer="uniform", trainable=True)
         self.pos_enc = positional_encoding(maxlen, embedding_dim)
         self.dropout = layers.Dropout(dropout)
-
+    
+    #only input sequences will have a gap dummy
+    #in this case we set skip_first=True to avoid positional encoding at the first index
     def call(self, x, training, skip_first):
         x_emb = tf.matmul(x, self.matrix)
         x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the paper...
@@ -168,6 +176,8 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
 ##################################################################################################
 ##################################################################################################
 
+# 1x self attention + feedforward
+# applies layernorm and dropout between these two and at the end
 class EncoderLayer(layers.Layer):
     def __init__(self, dim, heads, dim_ff, dropout=0.1):
         super(EncoderLayer, self).__init__()
@@ -188,7 +198,8 @@ class EncoderLayer(layers.Layer):
         seq_ffn = self.dropout2(seq_ffn, training=training)
         return self.layernorm2(seq_norm1 + seq_ffn)
 
-    
+
+# a stack of encoder layers
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, iterations, dim, heads, dim_ff, dropout=0.1):
         super(Encoder, self).__init__()
@@ -206,6 +217,11 @@ class Encoder(tf.keras.layers.Layer):
 ##################################################################################################
 ##################################################################################################
 
+# 1) self attention of the columns
+# 2) attention between sequences as keys,values and columns as query
+#    i.e. each output column will be a weighted average of all residues plus the gap dummy
+# 3) feedforward 
+# applies layernorm and dropout between all these steps and at the end
 class DecoderLayer(layers.Layer):
     
     def __init__(self, dim, heads, dim_ff, dropout=0.1):
@@ -243,7 +259,11 @@ class DecoderLayer(layers.Layer):
         x_ffn = self.dropout3(x_ffn, training=training)
         return self.layernorm3(x_norm2 + x_ffn), A
     
-    
+
+# a stack of decoder layers 
+# "aggregation_iterations" : after each of these the sequence_aggregation function is called 
+# to reduce the first dimension (=number of sequences)
+# "iterations" : successive decoder layers without aggregation
 class ColDecoder(layers.Layer):
     
     def __init__(self, iterations, aggregation_iterations, dim, heads, dim_ff, sequence_aggregation, dropout=0.1):
@@ -319,18 +339,34 @@ class NeuroAlignLayer(layers.Layer):
             
         out_cols, out_attention = self.col_decoder(self_tar, self_inp, training, col_look_ahead_mask, seq_padding_mask)
         out_cols = tf.squeeze(out_cols, 0)
+        
+        # share the alphabet-embedding matrix for input/output
+        # see paper: Using the output embedding to improve language models, Ofir Press and Lior Wolf, 2016
         out_cols = tf.matmul(out_cols, self.embedding.matrix, transpose_b = True)
+        
         out_cols = tf.nn.softmax(out_cols, axis=-1)
         out_attention = tf.squeeze(out_attention, 1)
         out_attention = tf.transpose(out_attention, perm=[0,2,1])
+        
+        # If the softmax is over the columns, the model outputs a
+        # probability distribution for each residuum.
+        # However, this approach may not be correct when doing autoregressive inference
+        # because a residuum might be undecided for its column if only the
+        # first i columns are predicted yet.
+        # Softmaxing over the sequences can therefore be a more natural choice because 
+        # the introduced gap dummy symbol allows a column to decide not to attend to any
+        # residuum at all.
+        # However, the model might let 2 columns attent to the same residuum in this case.
         if self.config["softmax_over_columns"]:
             softmax_axis = -1
         else:
             softmax_axis = -2
+            
         if self.config["pairs_with_gaps"]:
             out_attention = tf.nn.softmax(out_attention[:,:,:], axis=softmax_axis)
         else:
             out_attention = tf.nn.softmax(out_attention[:,1:,:], axis=softmax_axis)
+            
         return out_cols, out_attention
         
         
