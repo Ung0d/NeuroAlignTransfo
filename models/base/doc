@@ -1,0 +1,17 @@
+Start training with column loss ENABLED, attention loss ENABLED and sequence loss disabled.
+Use aggregated column targets. 
+Family size: 4000
+seq dim: 128
+col dim: 128
+ff dim: 256
+Heads: 4
+Encoder iterations: 2
+Decoder iterations: 1
+Aggregation iterations: 2
+Dropout: 0.05
+Sequence aggregation: <function reduce_mean at 0x7f2279b5d8b0>
+Column loss weight: 0.05
+Attention loss weight: 0.95
+Sequence loss weight: 1
+Pos attention weight: 1
+Neg attention weight: 1

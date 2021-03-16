@@ -1,0 +1,3 @@
+models/base_16head_pairs_with_gaps/*
+models/base2/*
+models/only_attention/*
