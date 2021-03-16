@@ -1,0 +1,6 @@
+clustalo : RV11  (precision, recall):  [0.62203526 0.59208826]
+mafft : RV11  (precision, recall):  [0.58849341 0.54751504]
+mafft linsi : RV11  (precision, recall):  [0.65115618 0.63443352]
+
+base model with teacher forcing : rv11 precision, recall: 0.8684820423000738, 0.6472342261358311
+base model : todo (currently worse than any above)
