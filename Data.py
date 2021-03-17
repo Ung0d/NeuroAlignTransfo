@@ -106,6 +106,21 @@ class Fasta:
         seq[:, 0, GAP_MARKER] = 1 #start marker
         seq[:, 1, START_MARKER] = 1
         return seq
+    
+    
+    def aminoacid_seq_str(self, i):
+        seq = ""
+        for j in self.raw_seq[i]:
+            seq += ALPHABET[j]
+        return seq
+    
+    
+    def column_str(self, i):
+        col = ""
+        ALPHABET_with_gap = ALPHABET + ["-"]
+        for j in self.ref_seq[:,i]:
+            col += ALPHABET_with_gap[j]
+        return col
 
 
 ##################################################################################################

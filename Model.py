@@ -427,11 +427,13 @@ def make_neuro_align_model(identifier):
 # columns with only positional encoding. The alignment length is naively estimated by a multiple of the longest sequence 
 # length in the input.
 def gen_columns(input_dict, model, model_config, max_length=1000):
+    HEADSTART = 0
     sequences = input_dict["sequences"]
     if model_config["use_column_loss"]:
         columns = np.zeros((max_length+1, len(data.ALPHABET)+3))
         columns[0,len(data.ALPHABET)+1] = 1 #start marker
-        for i in range(max_length):
+        columns[1:(HEADSTART+1)] = input_dict["in_columns"][1:(HEADSTART+1)]
+        for i in range(HEADSTART,max_length):
             inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
             out_col, A = model(inp, training=False)
             last_column = out_col[-1,:].numpy()
@@ -441,7 +443,7 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
             else:
                 residues = np.argmax(A[:,:,-1], axis=-1)
                 next_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
-                #print(A[:,:,-1])
+                #print(np.argmax(A[:,:,-1],axis=-1))
                 #print(last_column)
                 columns[i+1] = last_column
         return columns[:(i+1)], A
