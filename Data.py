@@ -91,21 +91,44 @@ class Fasta:
     
     
     #converts (a subset of) the sequences to one hot encodings, appends gap-, start- and end-markers
-    def one_hot_sequences(self, subset=None):
+    #mode defines how the sequences are layouted 
+    # leftbound writes them from left to write and fills short sequences with padded zeros
+    # uniform multiplies the longest sequence length by a constant a little greater than one
+    # and distributes the positions of each sequence uniformly at this space filling inbetweens with gaps
+    def one_hot_sequences(self, subset=None, mode="leftbound"):
         if subset is None:
             subset = list(range(len(self.raw_seq)))
         num_seqs = len(subset)
         lens = [self.seq_lens[si] for si in subset]
         maxlen = max(lens)
-        seq = np.zeros((num_seqs, maxlen+3, len(ALPHABET)+3), dtype=np.float32)
-        for j,(l,si) in enumerate(zip(lens, subset)):
-            lrange = np.arange(l)
-            seq[j, 2+lrange, self.raw_seq[si]] = 1
-            seq[j, 2+l, END_MARKER] = 1 #end marker
-        #first position = gap symbol (more details later, will not be affected by positional encoding)
-        seq[:, 0, GAP_MARKER] = 1 #start marker
-        seq[:, 1, START_MARKER] = 1
-        return seq
+        ranges = []
+        if mode == "leftbound":
+            seq = np.zeros((num_seqs, maxlen+3, len(ALPHABET)+3), dtype=np.float32)
+            for j,(l,si) in enumerate(zip(lens, subset)):
+                lrange = np.arange(l)+2
+                seq[j, lrange, self.raw_seq[si]] = 1
+                seq[j, 2+l, END_MARKER] = 1 #end marker
+                ranges.append(lrange)
+            #first position = gap symbol (more details later, will not be affected by positional encoding)
+            seq[:, 0, GAP_MARKER] = 1 #start marker
+            seq[:, 1, START_MARKER] = 1
+            return seq, maxlen+3, ranges, lens
+        else: #mode == "uniform"
+            L = int(np.floor(maxlen*1.1))+2
+            seq = np.zeros((num_seqs, L, len(ALPHABET)+3), dtype=np.float32)
+            ranges = []
+            for j,(l,si) in enumerate(zip(lens, subset)):
+                lrange = np.floor((np.arange(l)+1)*(L-1)/(l+1)).astype(int)
+                indx = np.zeros(L, dtype=np.bool)
+                indx[lrange] = 1
+                seq[j, indx, self.raw_seq[si]] = 1
+                seq[j, ~indx, GAP_MARKER] = 1
+                ranges.append(lrange)
+            seq[:, 0, START_MARKER] = 1
+            seq[:, 0, GAP_MARKER] = 0
+            seq[:, L-1, END_MARKER] = 1 #end marker
+            seq[:, L-1, GAP_MARKER] = 0
+            return seq, L, ranges, [L-2]*num_seqs
     
     
     def aminoacid_seq_str(self, i):
@@ -131,14 +154,12 @@ def get_input_target_data(family_fasta, seqs_drawn,
                           model_config,
                           ext = ""):
      
-    seq = family_fasta.one_hot_sequences(subset = seqs_drawn)
-    lens = [family_fasta.seq_lens[si] for si in seqs_drawn]
-    maxlen = max(lens)
+    seq, L, ranges, lens = family_fasta.one_hot_sequences(subset = seqs_drawn, mode=model_config["sequence_layout"])
     num_seqs = len(seqs_drawn)
     
     #remove empty columns 
     col_sizes = np.zeros(family_fasta.alignment_len)
-    for j,(l, si) in enumerate(zip(lens, seqs_drawn)):
+    for j,(l, si) in enumerate(zip([family_fasta.raw_seq[i].shape[0] for i in seqs_drawn], seqs_drawn)):
         suml = sum(family_fasta.seq_lens[:si])
         col_sizes[family_fasta.membership_targets[suml:(suml+l)]] += 1
     empty = (col_sizes == 0)
@@ -146,35 +167,47 @@ def get_input_target_data(family_fasta, seqs_drawn,
     cum_cols = np.cumsum(empty)
 
     corrected_targets = []
-    for j,(l, si) in enumerate(zip(lens, seqs_drawn)):
+    for j,(l, si) in enumerate(zip([family_fasta.raw_seq[i].shape[0] for i in seqs_drawn], seqs_drawn)):
         suml = sum(family_fasta.seq_lens[:si])
         ct = family_fasta.membership_targets[suml:(suml+l)]
         corrected_targets.append(ct - cum_cols[ct])
+       
+    if model_config["sequence_layout"] == "leftbound":
+        base = 2
+    else:
+        base = 1
         
-    memberships = np.zeros((num_seqs, maxlen+3, num_columns+2), dtype=np.float32)
-    for j,(l, targets) in enumerate(zip(lens, corrected_targets)):
-        lrange = np.arange(l)
+    memberships = np.zeros((num_seqs, L, num_columns+2), dtype=np.float32)
+    for j,(l, lrange, targets) in enumerate(zip(lens, ranges, corrected_targets)):
         #memberships site <-> columns
-        memberships[j, 2+lrange, 1+targets] = 1
-        memberships[j, 2+l, -1] = 1 
-    memberships[:,1,0] = 1 
-    memberships[:,0,:] = 1 - np.sum(memberships[:,1:,:], axis=1) #gaps
+        memberships[j, lrange, 1+targets] = 1
+        #memberships[j, base+l, -1] = 1 
+        
+    #if model_config["sequence_layout"] == "leftbound":
+        #memberships[:,1,0] = 1 
+    #if model_config["pairs_with_gaps"]:
+        #if model_config["sequence_layout"] == "leftbound":
+            #memberships[:,0,:] = 1 - np.sum(memberships[:,1:,:], axis=1) #gaps
+        #else:
+            #memberships[:,0,:] = 1 - np.sum(memberships[:,1:,:], axis=1) #gaps
+    #else:
+        #memberships[:,0,0] = 1 
 
     #the matmul computes aminoacid count vectors for each alignment column
     #furthermore, we add a "start" and an "end" marker and compute the number of gaps per column
     columns = np.matmul(np.transpose(memberships, [0,2,1]), seq)
     columns = np.sum(columns, axis=0)
     columns /= num_seqs
+    columns[1:-1, GAP_MARKER] = 1 - np.sum(columns[1:-1,:], axis=1)
+    columns[0, START_MARKER] = 1 
+    columns[-1, END_MARKER] = 1 
     if model_config["use_column_loss"]:
         in_columns = columns[:-1]
     else:
         in_columns = np.zeros_like(columns[:-1])
     out_columns = columns[1:]
         
-    if model_config["pairs_with_gaps"]:
-        out_memberships = memberships[:,:,1:]
-    else:
-        out_memberships = memberships[:,1:,1:]
+    out_memberships = memberships[:,:,1:]
     
     
     input_dict = {  ext+"sequences" : seq,

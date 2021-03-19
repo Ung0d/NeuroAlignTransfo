@@ -48,7 +48,9 @@ base_model = {
     "family_size" : 4000,
 
     #percentage of PFam protein families that become the validation set
-    "validation_split" : 0.05
+    "validation_split" : 0.05,
+    
+    "sequence_layout" : "leftbound"
 }
 
 
@@ -100,7 +102,9 @@ base_model2 = {
     "family_size" : 4000,
 
     #percentage of PFam protein families that become the validation set
-    "validation_split" : 0.05
+    "validation_split" : 0.05,
+    
+    "sequence_layout" : "leftbound"
 }
 
 
@@ -150,10 +154,22 @@ base_16head_pairs_with_gaps ={
 
     #when training, we feed one alignment per GPU at a time (since alignments are large)
     #the family size is an upper limit for the total sequence length in a sample
-    "family_size" : 4000
+    "family_size" : 4000,
+    
+    "sequence_layout" : "leftbound"
 }
+
+
+uniform_seqs = dict(base_model)
+uniform_seqs["num_heads"] = 4
+uniform_seqs["num_encoder_iterations"] = 2
+uniform_seqs["num_aggregation_iterations"] = 2
+#uniform_seqs["sequence_layout"] = "uniform"
 
 
 models = {"base" : base_model,
           "base2" : base_model2,
+          "uniform_seqs" : uniform_seqs,
+          "uniform_seqs2" : uniform_seqs,
+          "test" : uniform_seqs,
          "base_16head_pairs_with_gaps" : base_16head_pairs_with_gaps}

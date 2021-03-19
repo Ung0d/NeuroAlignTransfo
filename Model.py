@@ -264,7 +264,7 @@ class DecoderLayer(layers.Layer):
 # "aggregation_iterations" : after each of these the sequence_aggregation function is called 
 # to reduce the first dimension (=number of sequences)
 # "iterations" : successive decoder layers without aggregation
-class ColDecoder(layers.Layer):
+'''class ColDecoder(layers.Layer):
     
     def __init__(self, iterations, aggregation_iterations, dim, heads, dim_ff, sequence_aggregation, dropout=0.1):
         super(ColDecoder, self).__init__()
@@ -287,6 +287,38 @@ class ColDecoder(layers.Layer):
                 cols_raw, A = layer(cols_raw, seqs, look_ahead_mask, padding_mask,training)
             colsa = self.seq_aggr(cols_raw, axis=0, keepdims=True)
             cols = tf.repeat(colsa, repeats = num_seq, axis=0)
+        return colsa, A'''
+    
+    
+    
+    
+    
+class ColDecoder(layers.Layer):
+    
+    def __init__(self, iterations, aggregation_iterations, dim, heads, dim_ff, sequence_aggregation, dropout=0.1):
+        super(ColDecoder, self).__init__()
+        
+        self.dim = dim
+        self.iterations = iterations
+        self.aggregation_iterations = aggregation_iterations
+        self.seq_aggr = sequence_aggregation
+        self.dec_layers = [DecoderLayer(dim, heads, dim_ff, dropout) 
+                           for _ in range(aggregation_iterations-1)] 
+        self.dec_seq_layers = [DecoderLayer(dim, heads, dim_ff, dropout) 
+                           for _ in range(aggregation_iterations-1)] 
+        self.final_dec_layer = DecoderLayer(dim, 1, dim_ff, dropout)
+
+    def call(self, cols, seqs, training, 
+           look_ahead_mask, padding_mask):
+        num_seq = tf.shape(seqs)[0]
+        cols = tf.repeat(cols, repeats = num_seq, axis=0)
+        for layer, seq_layer in zip(self.dec_layers, self.dec_seq_layers):
+            cols, _ = layer(cols, seqs, look_ahead_mask, padding_mask, training)
+            colsa = self.seq_aggr(cols, axis=0, keepdims=True)
+            colsa = tf.repeat(colsa, repeats = num_seq, axis=0)
+            seqs, _ = seq_layer(seqs, colsa, padding_mask, None, training)
+        cols, A = self.final_dec_layer(cols, seqs, look_ahead_mask, padding_mask, training)
+        colsa = self.seq_aggr(cols, axis=0, keepdims=True)
         return colsa, A
 
 ##################################################################################################
@@ -362,10 +394,7 @@ class NeuroAlignLayer(layers.Layer):
         else:
             softmax_axis = -2
             
-        if self.config["pairs_with_gaps"]:
-            out_attention = tf.nn.softmax(out_attention[:,:,:], axis=softmax_axis)
-        else:
-            out_attention = tf.nn.softmax(out_attention[:,1:,:], axis=softmax_axis)
+        out_attention = tf.nn.softmax(out_attention[:,:,:], axis=softmax_axis)
             
         return out_cols, out_attention
         
@@ -412,7 +441,7 @@ def make_neuro_align_model(identifier):
         model.load_weights(checkpoint_path)
         print("Successfully loaded weights:", identifier, "model")
     else:
-        print("Configured model ", identifier, " and initialized weights randomly.")
+        print("Configured model", identifier, "and initialized weights randomly.")
 
     return model, cfg
 
