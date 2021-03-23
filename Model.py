@@ -159,19 +159,26 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
     def __init__(self, input_dim, embedding_dim, dropout, maxlen=4000):
         super(EmbeddingAndPositionalEncoding, self).__init__()
         self.matrix = self.add_weight(shape=(input_dim, embedding_dim), name='embedding', initializer="uniform", trainable=True)
-        self.pos_enc = positional_encoding(maxlen, embedding_dim)
+        self.gap_dummy = self.add_weight(shape=(1,1,embedding_dim), name="gap_dummy", initializer="uniform", trainable=True)
+        #self.pos_enc = positional_encoding(maxlen, embedding_dim)
+        forward_lstm = tf.keras.layers.LSTM(embedding_dim, return_sequences=True)
+        backward_lstm = tf.keras.layers.LSTM(embedding_dim, return_sequences=True, go_backwards=True)
+        self.bilstm = tf.keras.layers.Bidirectional(layer = forward_lstm, backward_layer=backward_lstm, merge_mode="sum")
         self.dropout = layers.Dropout(dropout)
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
     
     #only input sequences will have a gap dummy
     #in this case we set skip_first=True to avoid positional encoding at the first index
     def call(self, x, training, skip_first):
         x_emb = tf.matmul(x, self.matrix)
         x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the paper...
-        seq_len = tf.shape(x)[1]
+        x_enc = self.bilstm(x_emb)
+        x_enc = self.dropout(x_enc, training = training)
+        x_enc = self.layernorm(x_emb + x_enc)
         if skip_first:
-            return self.dropout(x_emb + self.pos_enc[0, :seq_len, :], training = training)
-        else:
-            return self.dropout(x_emb + self.pos_enc[0, 1:(seq_len+1), :], training = training)
+            gaps = tf.repeat(self.gap_dummy, tf.shape(x)[0], axis=0)
+            x_enc = tf.concat([gaps, x_enc], axis=1)
+        return x_enc
 
 ##################################################################################################
 ##################################################################################################
@@ -264,7 +271,7 @@ class DecoderLayer(layers.Layer):
 # "aggregation_iterations" : after each of these the sequence_aggregation function is called 
 # to reduce the first dimension (=number of sequences)
 # "iterations" : successive decoder layers without aggregation
-'''class ColDecoder(layers.Layer):
+class ColDecoder(layers.Layer):
     
     def __init__(self, iterations, aggregation_iterations, dim, heads, dim_ff, sequence_aggregation, dropout=0.1):
         super(ColDecoder, self).__init__()
@@ -287,13 +294,13 @@ class DecoderLayer(layers.Layer):
                 cols_raw, A = layer(cols_raw, seqs, look_ahead_mask, padding_mask,training)
             colsa = self.seq_aggr(cols_raw, axis=0, keepdims=True)
             cols = tf.repeat(colsa, repeats = num_seq, axis=0)
-        return colsa, A'''
+        return colsa, A
     
     
     
     
     
-class ColDecoder(layers.Layer):
+'''class ColDecoder(layers.Layer):
     
     def __init__(self, iterations, aggregation_iterations, dim, heads, dim_ff, sequence_aggregation, dropout=0.1):
         super(ColDecoder, self).__init__()
@@ -319,7 +326,7 @@ class ColDecoder(layers.Layer):
             seqs, _ = seq_layer(seqs, colsa, padding_mask, None, training)
         cols, A = self.final_dec_layer(cols, seqs, look_ahead_mask, padding_mask, training)
         colsa = self.seq_aggr(cols, axis=0, keepdims=True)
-        return colsa, A
+        return colsa, A'''
 
 ##################################################################################################
 ##################################################################################################

@@ -103,16 +103,16 @@ class Fasta:
         maxlen = max(lens)
         ranges = []
         if mode == "leftbound":
-            seq = np.zeros((num_seqs, maxlen+3, len(ALPHABET)+3), dtype=np.float32)
+            seq = np.zeros((num_seqs, maxlen+2, len(ALPHABET)+3), dtype=np.float32)
             for j,(l,si) in enumerate(zip(lens, subset)):
-                lrange = np.arange(l)+2
+                lrange = np.arange(l)+1
                 seq[j, lrange, self.raw_seq[si]] = 1
-                seq[j, 2+l, END_MARKER] = 1 #end marker
+                seq[j, 1+l, END_MARKER] = 1 #end marker
                 ranges.append(lrange)
             #first position = gap symbol (more details later, will not be affected by positional encoding)
-            seq[:, 0, GAP_MARKER] = 1 #start marker
-            seq[:, 1, START_MARKER] = 1
-            return seq, maxlen+3, ranges, lens
+            #seq[:, 0, GAP_MARKER] = 1 #start marker
+            seq[:, 0, START_MARKER] = 1
+            return seq, maxlen+2, ranges, lens
         else: #mode == "uniform"
             L = int(np.floor(maxlen*1.1))+2
             seq = np.zeros((num_seqs, L, len(ALPHABET)+3), dtype=np.float32)
