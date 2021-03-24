@@ -7,6 +7,7 @@ import Config as config
 import Data as data
 
 
+
 # Implementation of the NeuroAlign model
 # Here we use a Transformer sequence to sequence model.
 # The code is based on https://www.tensorflow.org/tutorials/text/transformer.
@@ -135,43 +136,49 @@ class MultiHeadAttention(layers.Layer):
 ##################################################################################################
 ##################################################################################################
 
-#positional encoding using sin and cos functions with varying frequencies
-def get_angles(pos, i, dim):
-    angle_rates = 1 / np.power(1000, (2 * (i//2)) / np.float32(dim))
-    return pos * angle_rates
-
-def positional_encoding(position, dim):
-    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
-                          np.arange(dim)[np.newaxis, :],
-                          dim)
-    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-    #shift by 1 to the right and set the first index to 0 (i.e. it has no particular position encoded)
-    #the first index will correspond to the gap dummy, a generic gap that functions as a positionless
-    #sequence member to which columns can attent if they have no corresponding amino acid
-    angle_rads = np.roll(angle_rads, shift=1, axis=0) 
-    angle_rads[0] = 0 
-    return tf.expand_dims(tf.cast(angle_rads, dtype=tf.float32), 0)
-
-#encodes the input sequences (i.e. transform input_dim to embedding_dim)
-#adds positional encoding
+#
+# Encodes the input sequences by replacing each amino acid with it's
+# high dimensional embedding. 
+# Inputs are one-hot encoded sequences. Using a matrix multiplication with the embedding matrix 
+# allows for modeling residual level uncertainty. For instance, if a sequence is only distantly related to others it might be
+# highly mutated. However, these mutations are not completely random an favor few other amino acids given an original amino acid.
+#
+# The embedding is followed by 2 (unidirectional) LSTM layers which replace the conventional positional encoding used for 
+# transformers. The LSTMs can also learn other important residual level features like secondary structure.
+#
 class EmbeddingAndPositionalEncoding(layers.Layer):
-    def __init__(self, input_dim, embedding_dim, dropout, maxlen=4000):
+    def __init__(self, input_dim, embedding_dim, num_lstm, dropout):
         super(EmbeddingAndPositionalEncoding, self).__init__()
-        self.matrix = self.add_weight(shape=(input_dim, embedding_dim), name='embedding', initializer="uniform", trainable=True)
-        self.pos_enc = positional_encoding(maxlen, embedding_dim)
+        self.matrix = self.add_weight(shape=(input_dim, embedding_dim),
+                                        name='embedding', initializer="uniform", trainable=True)
+        self.masking = layers.Masking()
+        self.forward_lstm = []
+        for i in range(num_lstm):
+            self.forward_lstm.append(layers.LSTM(embedding_dim, return_sequences=True))
         self.dropout = layers.Dropout(dropout)
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
     
-    #only input sequences will have a gap dummy
-    #in this case we set skip_first=True to avoid positional encoding at the first index
-    def call(self, x, training, skip_first):
+    # x is a (num_seq, len_seq, D) tensor where D is assumed to be a probability distribution over the underlying alphabet
+    # if use_gap_dummy == true, a shared gap dummy embedding is appended at the front of each sequence after positional encoding 
+    # (i.e. the gap is positionless, it functions as a dummy to allow columns to attent to something in the sequence, if
+    # to no amino acid)
+    def call(self, x, training, use_gap_dummy):
+        
+        #embedding
         x_emb = tf.matmul(x, self.matrix)
-        x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the paper...
-        seq_len = tf.shape(x)[1]
-        if skip_first:
-            return self.dropout(x_emb + self.pos_enc[0, :seq_len, :], training = training)
-        else:
-            return self.dropout(x_emb + self.pos_enc[0, 1:(seq_len+1), :], training = training)
+        x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the Transformer paper #XXXXX
+        
+        #encoding
+        x = self.masking(x)
+        for lstm in self.forward_lstm:
+            x = lstm(x)
+        x = self.dropout(x, training=training)
+        x = self.layernorm(x + x_emb)
+        if use_gap_dummy:
+            seq_num = tf.shape(x)[0]
+            #XXXXX probably want to scale the gap embedding like above
+            x = tf.concat([tf.repeat(tf.reshape(self.matrix[data.GAP_MARKER], (1,1,-1)), seq_num, axis=0), x], axis=1)
+        return x
 
 ##################################################################################################
 ##################################################################################################
@@ -298,7 +305,7 @@ class NeuroAlignLayer(layers.Layer):
         super(NeuroAlignLayer, self).__init__()
         
         self.config = config
-        self.embedding = EmbeddingAndPositionalEncoding(in_dim, config["seq_dim"], config["dropout"])
+        self.embedding = EmbeddingAndPositionalEncoding(in_dim, config["seq_dim"], config["num_lstm"], config["dropout"])
         self.encoder = Encoder(config["num_encoder_iterations"], 
                                config["seq_dim"], 
                                config["num_heads"], 
@@ -326,13 +333,13 @@ class NeuroAlignLayer(layers.Layer):
         )
 
 
-    def call(self, inp, tar, seq_padding_mask, col_look_ahead_mask, seq_look_ahead_mask, training):
+    def call(self, inp, tar, seq_padding_mask, col_look_ahead_mask, training):
         
         num_seq = tf.shape(inp)[0]
-        enc_inp = self.embedding(inp, training=training, skip_first=True)  
+        enc_inp = self.embedding(inp, training=training, use_gap_dummy=True)  
         self_inp = self.encoder(enc_inp, training, seq_padding_mask) 
         if self.config["use_column_loss"]:
-            enc_tar = self.embedding(tar, training=training, skip_first=False) 
+            enc_tar = self.embedding(tar, training=training, use_gap_dummy=False) 
             self_tar = self.encoder(enc_tar, training, col_look_ahead_mask) 
         else: 
             self_tar = self.col_init[:tf.shape(tar)[0], :]
@@ -346,7 +353,7 @@ class NeuroAlignLayer(layers.Layer):
         
         out_cols = tf.nn.softmax(out_cols, axis=-1)
         out_attention = tf.squeeze(out_attention, 1)
-        out_attention = tf.transpose(out_attention, perm=[0,2,1])
+        #out_attention = tf.transpose(out_attention, perm=[0,2,1])
         
         # If the softmax is over the columns, the model outputs a
         # probability distribution for each residuum.
@@ -357,15 +364,13 @@ class NeuroAlignLayer(layers.Layer):
         # the introduced gap dummy symbol allows a column to decide not to attend to any
         # residuum at all.
         # However, the model might let 2 columns attent to the same residuum in this case.
-        if self.config["softmax_over_columns"]:
-            softmax_axis = -1
-        else:
-            softmax_axis = -2
+        #if self.config["softmax_over_columns"]:
+            #softmax_axis = -1
+        #else:
+            #softmax_axis = -2
             
-        if self.config["pairs_with_gaps"]:
-            out_attention = tf.nn.softmax(out_attention[:,:,:], axis=softmax_axis)
-        else:
-            out_attention = tf.nn.softmax(out_attention[:,1:,:], axis=softmax_axis)
+         
+        out_attention = tf.nn.softmax(out_attention, axis=-1)
             
         return out_cols, out_attention
         
@@ -392,14 +397,15 @@ def make_neuro_align_model(identifier):
     FF = layers.Dense(INPUT_DIM, activation="softmax") #+ gap-, start- and end-marker
     
     #masks
-    seq_padding_mask = make_padding_mask(sequences)
+    #append ones to account for the gap dummy which is concatenated later
+    seq_padding_mask = make_padding_mask(tf.concat([tf.ones((num_seq,1,tf.shape(sequences)[-1])),
+                                        sequences], axis=1))
     col_look_ahead_mask = make_look_ahead_mask(columns)
-    seq_look_ahead_mask = make_look_ahead_mask(sequences[:,2:,:])
     
     columns_ = tf.expand_dims(columns, 0)
     
     #compute output
-    out_cols, A = NR(sequences, columns_, seq_padding_mask, col_look_ahead_mask, seq_look_ahead_mask)
+    out_cols, A = NR(sequences, columns_, seq_padding_mask, col_look_ahead_mask)
     
     #instantiate the model
     outputs = []
@@ -412,7 +418,7 @@ def make_neuro_align_model(identifier):
         model.load_weights(checkpoint_path)
         print("Successfully loaded weights:", identifier, "model")
     else:
-        print("Configured model ", identifier, " and initialized weights randomly.")
+        print("Configured model", identifier, "and initialized weights randomly.")
 
     return model, cfg
 
@@ -427,24 +433,26 @@ def make_neuro_align_model(identifier):
 # columns with only positional encoding. The alignment length is naively estimated by a multiple of the longest sequence 
 # length in the input.
 def gen_columns(input_dict, model, model_config, max_length=1000):
-    HEADSTART = 0
+    #HEADSTART = 10
     sequences = input_dict["sequences"]
     if model_config["use_column_loss"]:
         columns = np.zeros((max_length+1, len(data.ALPHABET)+3))
-        columns[0,len(data.ALPHABET)+1] = 1 #start marker
-        columns[1:(HEADSTART+1)] = input_dict["in_columns"][1:(HEADSTART+1)]
-        for i in range(HEADSTART,max_length):
+        columns[0, data.START_MARKER] = 1 #start marker
+        #columns[1:(HEADSTART+1)] = input_dict["in_columns"][1:(HEADSTART+1)]
+        for i in range(max_length):
             inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
             out_col, A = model(inp, training=False)
+            #residues = np.argmax(A[:,:,-1], axis=-1)
+            #last_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
+            #print(residues, last_column)
             last_column = out_col[-1,:].numpy()
+            #print(last_column)
+            #print(A[:,-1,:])
+            #print(last_column)
             marker = np.argmax(last_column)
-            if marker == len(data.ALPHABET)+2:
+            if marker == data.END_MARKER:
                 return columns[:(i+1)], A
             else:
-                residues = np.argmax(A[:,:,-1], axis=-1)
-                next_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
-                #print(np.argmax(A[:,:,-1],axis=-1))
-                #print(last_column)
                 columns[i+1] = last_column
         return columns[:(i+1)], A
     else:

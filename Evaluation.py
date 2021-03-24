@@ -27,11 +27,30 @@ def make_sq(y, mask):
     y_sq = tf.clip_by_value(y_sq, 0.0, 1.0)
     return y_sq
 
+bce = tf.keras.losses.BinaryCrossentropy(reduction=tf.keras.losses.Reduction.NONE)
+
+POS_WEIGHT = 1
+NEG_WEIGHT = 1
+
+def att_loss(y_true, y_pred):
+    mask = make_mask(y_true)
+    y_true_sq = make_sq(y_true, mask)
+    y_pred_sq = make_sq(y_pred, mask)
+    l = tf.expand_dims(bce(y_true_sq, y_pred_sq), -1)
+    w = POS_WEIGHT * y_true_sq + NEG_WEIGHT * (1-y_true_sq)
+    l *= w
+    return tf.reduce_sum(l) / tf.reduce_sum(w)
+
 #precision and recall metrics for aligned aminoacid pairs
+
+def flip(y):
+    return tf.transpose(y, [0, 2, 1])
 
 threshold = 0.5
 
 def precision(y_true, y_pred):
+    y_true = flip(y_true)
+    y_pred = flip(y_pred)
     mask = make_mask(y_true)
     y_true_sq = make_sq(y_true, mask)
     y_pred_sq = make_sq(y_pred, mask)
@@ -41,6 +60,8 @@ def precision(y_true, y_pred):
     return precision
 
 def recall(y_true, y_pred):
+    y_true = flip(y_true)
+    y_pred = flip(y_pred)
     mask = make_mask(y_true)
     y_true_sq = make_sq(y_true, mask)
     y_pred_sq = make_sq(y_pred, mask)
@@ -48,6 +69,20 @@ def recall(y_true, y_pred):
     true_positives = positives * y_true_sq
     recall = tf.reduce_sum(true_positives) / tf.math.maximum(tf.reduce_sum(y_true_sq), 1.0)
     return recall
+
+
+
+kld = tf.keras.losses.KLDivergence()
+
+#kld loss without class i 
+def one_out_kld(i):
+    def loss(y_true, y_pred):
+        class_mask = 1 - tf.one_hot([i], tf.shape(y_true)[-1])
+        scaled_y_true = y_true * class_mask / tf.expand_dims((1-y_true[:,i]), 1)
+        scaled_y_pred = y_pred * class_mask / tf.expand_dims((1-y_pred[:,i]), 1)
+        return kld(scaled_y_true, scaled_y_pred)
+    return loss
+    
 
 ##################################################################################################
 ##################################################################################################

@@ -162,7 +162,8 @@ def get_input_target_data(family_fasta, seqs_drawn,
 
     #the matmul computes aminoacid count vectors for each alignment column
     #furthermore, we add a "start" and an "end" marker and compute the number of gaps per column
-    columns = np.matmul(np.transpose(memberships, [0,2,1]), seq)
+    memberships = np.transpose(memberships, [0,2,1])
+    columns = np.matmul(memberships, seq)
     columns = np.sum(columns, axis=0)
     columns /= num_seqs
     if model_config["use_column_loss"]:
@@ -170,18 +171,12 @@ def get_input_target_data(family_fasta, seqs_drawn,
     else:
         in_columns = np.zeros_like(columns[:-1])
     out_columns = columns[1:]
-        
-    if model_config["pairs_with_gaps"]:
-        out_memberships = memberships[:,:,1:]
-    else:
-        out_memberships = memberships[:,1:,1:]
     
-    
-    input_dict = {  ext+"sequences" : seq,
-                     ext+"in_columns" : in_columns }
+    input_dict = {  ext+"sequences" : seq[:,1:,:],
+                    ext+"in_columns" : in_columns }
         
     target_dict = { ext+"out_columns" : out_columns,
-                      ext+"out_attention" : out_memberships }
+                    ext+"out_attention" : memberships[:,1:,:] }
         
     return input_dict, target_dict
 
