@@ -92,7 +92,7 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 ##################################################################################################
 ##################################################################################################
 
-optimizer = tf.keras.optimizers.Adam(CustomSchedule(), beta_1=0.9, beta_2=0.98, 
+optimizer = tf.keras.optimizers.Adam(8e-4, beta_1=0.9, beta_2=0.98, 
                                      epsilon=1e-9)
 
 ##################################################################################################
@@ -143,5 +143,5 @@ csv_logger = CSVLogger(MODEL_PATH + "/log.csv", append=True, separator=',')
 history = model.fit(train_gen,
                     validation_data=val_gen,
                     epochs = NUM_EPOCHS,
-                    verbose = 1,
+                    verbose = 2,
                     callbacks=[ModelCheckpoint(), csv_logger])
