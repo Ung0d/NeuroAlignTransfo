@@ -165,7 +165,8 @@ def get_input_target_data(family_fasta, seqs_drawn,
     memberships = np.transpose(memberships, [0,2,1])
     columns = np.matmul(memberships, seq)
     columns = np.sum(columns, axis=0)
-    columns /= num_seqs
+    if not model_config["columns_as_count_vectors"]:
+        columns /= num_seqs
     if model_config["use_column_loss"]:
         in_columns = columns[:-1]
     else:

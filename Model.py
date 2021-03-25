@@ -442,12 +442,12 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
         for i in range(max_length):
             inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
             out_col, A = model(inp, training=False)
-            #residues = np.argmax(A[:,:,-1], axis=-1)
+            residues = np.argmax(A[:,-1,:], axis=-1)
             #last_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
             #print(residues, last_column)
             last_column = out_col[-1,:].numpy()
-            #print(last_column)
-            #print(A[:,-1,:])
+            #print(residues)
+            print(A[:,-1,:])
             #print(last_column)
             marker = np.argmax(last_column)
             if marker == data.END_MARKER:
@@ -460,3 +460,27 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
         columns = np.zeros((alen, len(data.ALPHABET)+3))
         inp = {"sequences" : sequences, "in_columns" : columns}
         return neuroalign(inp, training=False)
+    
+    
+#####################################################################################################################################
+#####################################################################################################################################
+
+
+class DirichletMixturePrior(layers.Layer):
+    def __init__(self, k, alphabet_size):
+        super(DirichletMixturePrior, self).__init__()
+        # Dirichlet parameters > 0
+        self.alpha = tf.nn.softplus(self.add_weight(shape=(1, k, alphabet_size),
+                                        name="alpha", initializer="uniform", trainable=True))
+        # mixture coefficients that sum to 1
+        self.mixture_coeff = tf.nn.softmax(self.add_weight(shape=(1, k),
+                                        name="mixture_coeff", initializer="uniform", trainable=True))
+
+
+    # in: n x alphabet_size count vectors 
+    # out: n x k posterior probabilty distribution P(k | count)
+    def call(self, counts, total_count):
+        dist = tfp.distributions.DirichletMultinomial(total_count, self.alpha)
+        probs = dist.prob(tf.expand_dims(counts, 1)) #P(count | p_k)
+        mix_probs = self.mixture_coeff * probs
+        return mix_probs / tf.reduce_sum(mix_probs, axis=-1, keepdims=True)
