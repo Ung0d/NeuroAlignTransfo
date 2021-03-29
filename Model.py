@@ -151,6 +151,8 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
         super(EmbeddingAndPositionalEncoding, self).__init__()
         self.matrix = self.add_weight(shape=(input_dim, embedding_dim),
                                         name='embedding', initializer="uniform", trainable=True)
+        self.gap_dummy = self.add_weight(shape=(1,1,embedding_dim),
+                                        name='gap_dummy', initializer="uniform", trainable=True)
         self.masking = layers.Masking()
         self.forward_lstm = []
         for i in range(num_lstm):
@@ -177,7 +179,7 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
         if use_gap_dummy:
             seq_num = tf.shape(x)[0]
             #XXXXX probably want to scale the gap embedding like above
-            x = tf.concat([tf.repeat(tf.reshape(self.matrix[data.GAP_MARKER], (1,1,-1)), seq_num, axis=0), x], axis=1)
+            x = tf.concat([tf.repeat(self.gap_dummy, seq_num, axis=0), x], axis=1)
         return x
 
 ##################################################################################################
@@ -370,7 +372,7 @@ class NeuroAlignLayer(layers.Layer):
             #softmax_axis = -2
             
          
-        out_attention = tf.nn.softmax(out_attention, axis=-1)
+        out_attention = tf.nn.softmax(out_attention[:,:-1,2:-1], axis=-2)
             
         return out_cols, out_attention
         
@@ -379,7 +381,7 @@ class NeuroAlignLayer(layers.Layer):
 #####################################################################################################################################
 #####################################################################################################################################
 
-INPUT_DIM = len(data.ALPHABET) + 3
+INPUT_DIM = len(data.ALPHABET) + 2
     
 #create the model using keras functional api
 def make_neuro_align_model(identifier):
@@ -394,7 +396,7 @@ def make_neuro_align_model(identifier):
     #layers
     NR = NeuroAlignLayer(INPUT_DIM, cfg)
     
-    FF = layers.Dense(INPUT_DIM, activation="softmax") #+ gap-, start- and end-marker
+    FF = layers.Dense(INPUT_DIM, activation="softmax") #+ start- and end-marker
     
     #masks
     #append ones to account for the gap dummy which is concatenated later
@@ -436,18 +438,20 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
     #HEADSTART = 10
     sequences = input_dict["sequences"]
     if model_config["use_column_loss"]:
-        columns = np.zeros((max_length+1, len(data.ALPHABET)+3))
+        columns = np.zeros((max_length+1, len(data.ALPHABET)+2))
         columns[0, data.START_MARKER] = 1 #start marker
         #columns[1:(HEADSTART+1)] = input_dict["in_columns"][1:(HEADSTART+1)]
         for i in range(max_length):
             inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
             out_col, A = model(inp, training=False)
-            residues = np.argmax(A[:,-1,:], axis=-1)
+            #print(out_col.shape)
+            #print(A.shape)
+            #residues = np.argmax(A[:,-1,:], axis=-1)
             #last_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
             #print(residues, last_column)
             last_column = out_col[-1,:].numpy()
             #print(residues)
-            print(A[:,-1,:])
+            #print(A[:,-1,:])
             #print(last_column)
             marker = np.argmax(last_column)
             if marker == data.END_MARKER:
@@ -460,27 +464,3 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
         columns = np.zeros((alen, len(data.ALPHABET)+3))
         inp = {"sequences" : sequences, "in_columns" : columns}
         return neuroalign(inp, training=False)
-    
-    
-#####################################################################################################################################
-#####################################################################################################################################
-
-
-class DirichletMixturePrior(layers.Layer):
-    def __init__(self, k, alphabet_size):
-        super(DirichletMixturePrior, self).__init__()
-        # Dirichlet parameters > 0
-        self.alpha = tf.nn.softplus(self.add_weight(shape=(1, k, alphabet_size),
-                                        name="alpha", initializer="uniform", trainable=True))
-        # mixture coefficients that sum to 1
-        self.mixture_coeff = tf.nn.softmax(self.add_weight(shape=(1, k),
-                                        name="mixture_coeff", initializer="uniform", trainable=True))
-
-
-    # in: n x alphabet_size count vectors 
-    # out: n x k posterior probabilty distribution P(k | count)
-    def call(self, counts, total_count):
-        dist = tfp.distributions.DirichletMultinomial(total_count, self.alpha)
-        probs = dist.prob(tf.expand_dims(counts, 1)) #P(count | p_k)
-        mix_probs = self.mixture_coeff * probs
-        return mix_probs / tf.reduce_sum(mix_probs, axis=-1, keepdims=True)

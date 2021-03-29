@@ -8,12 +8,6 @@ base_model = {
     #train the probability of aligning a aminoacid pair (=squared attention weight matrix) 
     "use_attention_loss" : True,
     
-    "columns_as_count_vectors" : False,
-    
-    #if true, the attention scores are softmaxed over the columns in the output
-    #soft alignment, if false, the softmax is over the sequences plus a dummy gap symbol (positionless)
-    "softmax_over_columns" : False,
-    
     #dimensionality of the latent representation for each residuum
     "seq_dim" : 128,
     
@@ -62,8 +56,8 @@ dirichlet = dict(base_model)
 dirichlet["num_encoder_iterations"] = 3
 dirichlet["num_aggregation_iterations"] = 3
 dirichlet["single_head_seq_to_col"] = False
-dirichlet["columns_as_count_vectors"] = True
 
 models = {"base" : base_model,
          "base2" : base_model2,
-         "dirichlet" : dirichlet}
+         "dirichlet" : dirichlet,
+         "full_col_dist" : dirichlet}

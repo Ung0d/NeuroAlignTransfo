@@ -3,6 +3,7 @@ import copy
 import random
 import tensorflow as tf
 from tensorflow import keras
+import DirichletMixturePrior as dirichlet
 
 ##################################################################################################
 ##################################################################################################
@@ -13,9 +14,13 @@ ALPHABET = ['A', 'R',  'N',  'D',  'C',  'Q',  'E',  'G',  'H', 'I',  'L',  'K',
             'M',  'F',  'P', 'S',  'T',  'W',  'Y',  'V',  'B',  'Z',  'X', 'U', 'O']
 
 
-GAP_MARKER = len(ALPHABET)
-START_MARKER = len(ALPHABET)+1
-END_MARKER = len(ALPHABET)+2
+START_MARKER = len(ALPHABET)
+END_MARKER = len(ALPHABET)+1
+
+##################################################################################################
+##################################################################################################
+
+dirichlet_mix_prior = dirichlet.make_prior(ALPHABET)
 
 ##################################################################################################
 ##################################################################################################
@@ -82,30 +87,96 @@ class Fasta:
 
 
     def compute_targets(self):
+        
         #a mapping from raw position to column index
-        cumsum = np.cumsum(self.ref_seq != len(ALPHABET), axis=1) #A-B--C -> 112223
-        diff = np.diff(np.insert(cumsum, 0, 0.0, axis=1), axis=1) #112223 -> 0112223 -> [[(i+1) - i]] -> 101001
+        #A-B--C -> 112223
+        cumsum = np.cumsum(self.ref_seq != len(ALPHABET), axis=1) 
+        #112223 -> 0112223 -> [[(i+1) - i]] -> 101001
+        diff = np.diff(np.insert(cumsum, 0, 0.0, axis=1), axis=1) 
         diff_where = [np.argwhere(diff[i,:]).flatten() for i in range(diff.shape[0])]
         self.membership_targets = np.concatenate(diff_where).flatten()
         
+        seq = self.one_hot_sequences(append_markers=False)
+        memberships, _ = self.column_memberships()
+        
+        #the matmul computes aminoacid count vectors for each alignment column
+        column_count_vectors = np.matmul(memberships, seq)
+        self.column_count_vectors = np.sum(column_count_vectors, axis=0)
+        #posterior distributions for all columns
+        posterior_component_prob = dirichlet_mix_prior.posterior_component_prob(
+                                                            self.column_count_vectors[:,:20])
+        #self.columns = dirichlet_mix_prior.posterior_amino_acid_prob(
+                                                            #self.column_count_vectors[:,:20], 
+                                                            #posterior_component_prob).numpy()
+        self.columns = self.column_count_vectors / np.sum(self.column_count_vectors, keepdims=True, axis=-1)
+        #print(self.column_count_vectors[18])
+        #print(posterior_component_prob[18])
+        #print(np.sum(posterior_component_prob[18]))
+        #print(dirichlet_mix_prior.posterior_component_prob(self.column_count_vectors[18:19,:20]))
     
     
-    #converts (a subset of) the sequences to one hot encodings, appends gap-, start- and end-markers
-    def one_hot_sequences(self, subset=None):
+    #converts (a subset of) the sequences to one hot encodings, optionally appends gap-, start- and end-markers
+    def one_hot_sequences(self, append_markers=True, subset=None):
         if subset is None:
             subset = list(range(len(self.raw_seq)))
         num_seqs = len(subset)
         lens = [self.seq_lens[si] for si in subset]
         maxlen = max(lens)
-        seq = np.zeros((num_seqs, maxlen+3, len(ALPHABET)+3), dtype=np.float32)
+        alphabet_size = len(ALPHABET)
+        if append_markers:
+            maxlen += 2
+            alphabet_size += 2
+        seq = np.zeros((num_seqs, maxlen, alphabet_size), dtype=np.float32)
         for j,(l,si) in enumerate(zip(lens, subset)):
             lrange = np.arange(l)
-            seq[j, 2+lrange, self.raw_seq[si]] = 1
-            seq[j, 2+l, END_MARKER] = 1 #end marker
-        #first position = gap symbol (more details later, will not be affected by positional encoding)
-        seq[:, 0, GAP_MARKER] = 1 #start marker
-        seq[:, 1, START_MARKER] = 1
+            if append_markers:
+                seq[j, 1+lrange, self.raw_seq[si]] = 1
+                seq[j, 1+l, END_MARKER] = 1 #end marker
+            else:
+                seq[j, lrange, self.raw_seq[si]] = 1
+        if append_markers:
+            seq[:, 0, START_MARKER] = 1
         return seq
+    
+    
+    #returns a binary matrix indicating which residues correspond to which columns
+    #if only a subset of the sequences is required, empty columns will be removed
+    #output shape is (num_seq, num_columns, max_len_seq)
+    def column_memberships(self, subset=None):
+        if subset is None:
+            subset = list(range(len(self.raw_seq)))
+        
+        lens = [self.seq_lens[si] for si in subset]
+        maxlen = max(lens)
+        num_seqs = len(subset)
+        
+        #remove empty columns 
+        col_sizes = np.zeros(self.alignment_len)
+        for j,(l, si) in enumerate(zip(lens, subset)):
+            suml = sum(self.seq_lens[:si])
+            col_sizes[self.membership_targets[suml:(suml+l)]] += 1
+        empty = (col_sizes == 0)
+        num_columns = int(np.sum(~empty))
+        cum_cols = np.cumsum(empty)
+            
+        #shift column indices according to removed empty columns
+        corrected_targets = []
+        target_subset = np.zeros(self.alignment_len, dtype=bool)
+        for j,(l, si) in enumerate(zip(lens, subset)):
+            suml = sum(self.seq_lens[:si])
+            ct = self.membership_targets[suml:(suml+l)]
+            target_subset[ct] = 1
+            corrected_targets.append(ct - cum_cols[ct])
+
+        memberships = np.zeros((num_seqs, maxlen, num_columns), dtype=np.float32)
+        for j,(l, targets) in enumerate(zip(lens, corrected_targets)):
+            lrange = np.arange(l)
+            memberships[j, lrange, targets] = 1
+            
+            
+        return np.transpose(memberships, [0,2,1]), target_subset
+            
+        
     
     
     def aminoacid_seq_str(self, i):
@@ -132,52 +203,20 @@ def get_input_target_data(family_fasta, seqs_drawn,
                           ext = ""):
      
     seq = family_fasta.one_hot_sequences(subset = seqs_drawn)
-    lens = [family_fasta.seq_lens[si] for si in seqs_drawn]
-    maxlen = max(lens)
-    num_seqs = len(seqs_drawn)
+    memberships, target_subset = family_fasta.column_memberships(subset = seqs_drawn)
     
-    #remove empty columns 
-    col_sizes = np.zeros(family_fasta.alignment_len)
-    for j,(l, si) in enumerate(zip(lens, seqs_drawn)):
-        suml = sum(family_fasta.seq_lens[:si])
-        col_sizes[family_fasta.membership_targets[suml:(suml+l)]] += 1
-    empty = (col_sizes == 0)
-    num_columns = int(np.sum(~empty))
-    cum_cols = np.cumsum(empty)
-
-    corrected_targets = []
-    for j,(l, si) in enumerate(zip(lens, seqs_drawn)):
-        suml = sum(family_fasta.seq_lens[:si])
-        ct = family_fasta.membership_targets[suml:(suml+l)]
-        corrected_targets.append(ct - cum_cols[ct])
-        
-    memberships = np.zeros((num_seqs, maxlen+3, num_columns+2), dtype=np.float32)
-    for j,(l, targets) in enumerate(zip(lens, corrected_targets)):
-        lrange = np.arange(l)
-        #memberships site <-> columns
-        memberships[j, 2+lrange, 1+targets] = 1
-        memberships[j, 2+l, -1] = 1 
-    memberships[:,1,0] = 1 
-    memberships[:,0,:] = 1 - np.sum(memberships[:,1:,:], axis=1) #gaps
-
-    #the matmul computes aminoacid count vectors for each alignment column
-    #furthermore, we add a "start" and an "end" marker and compute the number of gaps per column
-    memberships = np.transpose(memberships, [0,2,1])
-    columns = np.matmul(memberships, seq)
-    columns = np.sum(columns, axis=0)
-    if not model_config["columns_as_count_vectors"]:
-        columns /= num_seqs
-    if model_config["use_column_loss"]:
-        in_columns = columns[:-1]
-    else:
-        in_columns = np.zeros_like(columns[:-1])
+    columns = np.zeros((memberships.shape[1]+2, len(ALPHABET)+2))
+    columns[1:-1, :len(ALPHABET)] = family_fasta.columns[target_subset]
+    columns[0, START_MARKER] = 1
+    columns[-1, END_MARKER] = 1
+    in_columns = columns[:-1]
     out_columns = columns[1:]
     
-    input_dict = {  ext+"sequences" : seq[:,1:,:],
+    input_dict = {  ext+"sequences" : seq,
                     ext+"in_columns" : in_columns }
         
     target_dict = { ext+"out_columns" : out_columns,
-                    ext+"out_attention" : memberships[:,1:,:] }
+                    ext+"out_attention" : memberships }
         
     return input_dict, target_dict
 
