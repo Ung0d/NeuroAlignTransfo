@@ -33,6 +33,8 @@ POS_WEIGHT = 1
 NEG_WEIGHT = 1
 
 def att_loss(y_true, y_pred):
+    y_true = flip(y_true)
+    y_pred = flip(y_pred)
     mask = make_mask(y_true)
     y_true_sq = make_sq(y_true, mask)
     y_pred_sq = make_sq(y_pred, mask)

@@ -66,4 +66,5 @@ dirichlet["columns_as_count_vectors"] = True
 
 models = {"base" : base_model,
          "base2" : base_model2,
-         "dirichlet" : dirichlet}
+         "dirichlet" : dirichlet,
+         "anc_probs" : base_model}

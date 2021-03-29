@@ -370,7 +370,7 @@ class NeuroAlignLayer(layers.Layer):
             #softmax_axis = -2
             
          
-        out_attention = tf.nn.softmax(out_attention, axis=-1)
+        out_attention = tf.nn.softmax(out_attention, axis=-2)
             
         return out_cols, out_attention
         
@@ -447,7 +447,7 @@ def gen_columns(input_dict, model, model_config, max_length=1000):
             #print(residues, last_column)
             last_column = out_col[-1,:].numpy()
             #print(residues)
-            print(A[:,-1,:])
+            #print(A[:,-1,:])
             #print(last_column)
             marker = np.argmax(last_column)
             if marker == data.END_MARKER:
