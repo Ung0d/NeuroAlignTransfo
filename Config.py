@@ -53,9 +53,16 @@ base_model2["num_aggregation_iterations"] = 3
 base_model2["single_head_seq_to_col"] = False
 
 dirichlet = dict(base_model)
-dirichlet["num_encoder_iterations"] = 3
-dirichlet["num_aggregation_iterations"] = 3
+dirichlet["num_encoder_iterations"] = 2
+dirichlet["num_aggregation_iterations"] = 2
 dirichlet["single_head_seq_to_col"] = False
+dirichlet["seq_dim"] = 64
+dirichlet["col_dim"] = 64
+dirichlet["dim_ff"] = 128
+dirichlet["num_heads"] = 4
+dirichlet["num_lstm"] = 1
+
+
 
 models = {"base" : base_model,
          "base2" : base_model2,

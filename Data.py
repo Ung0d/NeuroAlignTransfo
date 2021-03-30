@@ -103,16 +103,13 @@ class Fasta:
         column_count_vectors = np.matmul(memberships, seq)
         self.column_count_vectors = np.sum(column_count_vectors, axis=0)
         #posterior distributions for all columns
-        posterior_component_prob = dirichlet_mix_prior.posterior_component_prob(
-                                                            self.column_count_vectors[:,:20])
+        #posterior_component_prob = dirichlet_mix_prior.posterior_component_prob(
+                                                            #self.column_count_vectors[:,:20])
         #self.columns = dirichlet_mix_prior.posterior_amino_acid_prob(
                                                             #self.column_count_vectors[:,:20], 
                                                             #posterior_component_prob).numpy()
         self.columns = self.column_count_vectors / np.sum(self.column_count_vectors, keepdims=True, axis=-1)
-        #print(self.column_count_vectors[18])
-        #print(posterior_component_prob[18])
-        #print(np.sum(posterior_component_prob[18]))
-        #print(dirichlet_mix_prior.posterior_component_prob(self.column_count_vectors[18:19,:20]))
+        
     
     
     #converts (a subset of) the sequences to one hot encodings, optionally appends gap-, start- and end-markers
