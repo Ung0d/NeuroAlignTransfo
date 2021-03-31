@@ -209,11 +209,15 @@ def get_input_target_data(family_fasta, seqs_drawn,
     in_columns = columns[:-1]
     out_columns = columns[1:]
     
+    gaps = 1 - np.sum(memberships, axis=2)
+    gaps = np.concatenate([gaps, np.ones((gaps.shape[0],1))], axis=-1)
+    
     input_dict = {  ext+"sequences" : seq,
                     ext+"in_columns" : in_columns }
         
-    target_dict = { ext+"out_columns" : out_columns,
-                    ext+"out_attention" : memberships }
+    target_dict = { #ext+"out_columns" : out_columns,
+                    #ext+"out_attention" : memberships,
+                    ext+"out_gaps" : gaps }
         
     return input_dict, target_dict
 
@@ -247,7 +251,7 @@ class AlignmentSampleGenerator(keras.utils.Sequence):
 
     def __len__(self):
         if self.training:
-            if len(self.fasta) > 10:
+            if len(self.fasta) > 1000:
                 return int(len(self.split)*EPOCH_PART)
             else: 
                 return 1000

@@ -2,12 +2,6 @@ import tensorflow as tf
 
 base_model = {
     
-    #train the aminoacid distributions of the output columns
-    "use_column_loss" : True,
-    
-    #train the probability of aligning a aminoacid pair (=squared attention weight matrix) 
-    "use_attention_loss" : True,
-    
     #dimensionality of the latent representation for each residuum
     "seq_dim" : 128,
     
@@ -62,9 +56,13 @@ dirichlet["dim_ff"] = 128
 dirichlet["num_heads"] = 4
 dirichlet["num_lstm"] = 1
 
+gap_prob = dict(dirichlet)
+gap_prob["dropout"] = 0.1
+gap_prob["sequence_aggregation"] = tf.reduce_sum
 
 
 models = {"base" : base_model,
          "base2" : base_model2,
          "dirichlet" : dirichlet,
-         "full_col_dist" : dirichlet}
+         "full_col_dist" : dirichlet,
+         "gap_prob" : gap_prob}

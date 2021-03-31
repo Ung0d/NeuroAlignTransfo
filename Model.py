@@ -281,22 +281,60 @@ class ColDecoder(layers.Layer):
         self.dim = dim
         self.iterations = iterations
         self.aggregation_iterations = aggregation_iterations
-        self.seq_aggr = sequence_aggregation
+        
+        self.ffn_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )        
+        self.ffn_sequence_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
+        self.ffn_global_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
+        self.ffn_update = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
+        
+        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
+        self.dropout = layers.Dropout(dropout)
         self.dec_layers = [DecoderLayer(dim, heads, dim_ff, dropout) 
-                           for _ in range(iterations*aggregation_iterations-1)] + [DecoderLayer(dim, 1, dim_ff, dropout)]
+                           for _ in range(iterations*aggregation_iterations-1)] + [DecoderLayer(dim, heads, dim_ff, dropout)]
+    
+    # Updates C via message passing and aggregations to
+    # allow intersequencial and global information flow
+    def message_and_aggregate(self, C, sequence_summary):
+        
+        num_seq = tf.shape(C)[0]
+        num_col = tf.shape(C)[1]
+        
+        C_message = self.ffn_message(C)
+        C_message = tf.reduce_sum(C_message, axis=0, keepdims=True) - C_message
+        
+        #global summary of the alignment up to column l
+        global_summary = self.ffn_global_message(C)
+        global_summary = tf.math.cumsum(global_summary, axis=1)
+        global_summary /= tf.cast(tf.reshape(tf.range(1, num_col+1), (1,-1,1)), dtype=C.dtype)
+        global_summary = tf.reduce_sum(global_summary, axis=0, keepdims=True)
+        global_summary = tf.tile(global_summary, [num_seq, 1, 1])
+        
+        C = self.ffn_update(tf.concat([C, C_message, sequence_summary, global_summary], axis=-1))
+        C = self.dropout(C)
+        C = self.layernorm(C)
+        return C
+        
 
-    def call(self, cols, seqs, training, 
+    def call(self, C, S, training, 
            look_ahead_mask, padding_mask):
-        num_seq = tf.shape(seqs)[0]
-        cols = tf.repeat(cols, repeats = num_seq, axis=0)
+        
+        num_seq = tf.shape(S)[0]
+        num_col = tf.shape(C)[1]
+        
+        #global summary of each sequence
+        sequence_summary = self.ffn_sequence_message(S)
+        sequence_summary = tf.reduce_sum(sequence_summary * tf.reshape(padding_mask, (num_seq,-1,1)), 
+                                         axis=1, keepdims=True)
+        sequence_summary = tf.tile(sequence_summary, [1, num_col, 1])
+        
+        C = tf.repeat(C, repeats = num_seq, axis=0)
         for i in range(self.aggregation_iterations):
-            cols_raw = cols
             for j in range(self.iterations):
                 layer = self.dec_layers[i*self.iterations + j]
-                cols_raw, A = layer(cols_raw, seqs, look_ahead_mask, padding_mask,training)
-            colsa = self.seq_aggr(cols_raw, axis=0, keepdims=True)
-            cols = tf.repeat(colsa, repeats = num_seq, axis=0)
-        return colsa, A
+                C, A = layer(C, S, look_ahead_mask, padding_mask,training)
+            C = self.message_and_aggregate(C, sequence_summary)
+            
+        return C, A
 
 ##################################################################################################
 ##################################################################################################
@@ -325,36 +363,32 @@ class NeuroAlignLayer(layers.Layer):
                                       config["dim_ff"], 
                                       config["sequence_aggregation"], 
                                       config["dropout"])
-        
-        if not config["use_column_loss"]:
-            self.col_init = self.add_weight(
-            shape=(10000, config["col_dim"]),
-            initializer="random_normal",
-            trainable=True,
-            name="col_init"
-        )
+        self.dense = layers.Dense(1, activation="sigmoid")
 
 
     def call(self, inp, tar, seq_padding_mask, col_look_ahead_mask, training):
         
         num_seq = tf.shape(inp)[0]
+        
         enc_inp = self.embedding(inp, training=training, use_gap_dummy=True)  
         self_inp = self.encoder(enc_inp, training, seq_padding_mask) 
-        if self.config["use_column_loss"]:
-            enc_tar = self.embedding(tar, training=training, use_gap_dummy=False) 
-            self_tar = self.encoder(enc_tar, training, col_look_ahead_mask) 
-        else: 
-            self_tar = self.col_init[:tf.shape(tar)[0], :]
+        
+        enc_tar = self.embedding(tar, training=training, use_gap_dummy=False) 
+        self_tar = self.encoder(enc_tar, training, col_look_ahead_mask) 
             
         out_cols, out_attention = self.col_decoder(self_tar, self_inp, training, col_look_ahead_mask, seq_padding_mask)
-        out_cols = tf.squeeze(out_cols, 0)
+        #out_cols = tf.squeeze(out_cols, 0)
         
         # share the alphabet-embedding matrix for input/output
         # see paper: Using the output embedding to improve language models, Ofir Press and Lior Wolf, 2016
-        out_cols = tf.matmul(out_cols, self.embedding.matrix, transpose_b = True)
+        #out_cols = tf.matmul(out_cols, self.embedding.matrix, transpose_b = True)
         
-        out_cols = tf.nn.softmax(out_cols, axis=-1)
-        out_attention = tf.squeeze(out_attention, 1)
+        #out_cols = tf.nn.softmax(out_cols, axis=-1)
+        
+        out_cols = self.dense(out_cols)
+        out_cols = tf.squeeze(out_cols, -1)
+        
+        #out_attention = tf.squeeze(out_attention, 1)
         #out_attention = tf.transpose(out_attention, perm=[0,2,1])
         
         # If the softmax is over the columns, the model outputs a
@@ -411,8 +445,8 @@ def make_neuro_align_model(identifier):
     
     #instantiate the model
     outputs = []
-    outputs.append(layers.Lambda(lambda x: x, name="out_columns")(out_cols)) #lambda identity used for renaming
-    outputs.append(layers.Lambda(lambda x: x, name="out_attention")(A))
+    outputs.append(layers.Lambda(lambda x: x, name="out_gaps")(out_cols)) #lambda identity used for renaming
+    #outputs.append(layers.Lambda(lambda x: x, name="out_attention")(A))
     model = keras.Model(inputs=[sequences, columns], outputs=outputs)
     
     checkpoint_path = "./models/"+identifier+"/model.ckpt"
@@ -434,33 +468,26 @@ def make_neuro_align_model(identifier):
 # If column loss is not enabled, no unrolling occurs. Instead, the output is based on a single iteration on "empty"
 # columns with only positional encoding. The alignment length is naively estimated by a multiple of the longest sequence 
 # length in the input.
-def gen_columns(input_dict, model, model_config, max_length=1000):
-    #HEADSTART = 10
-    sequences = input_dict["sequences"]
-    if model_config["use_column_loss"]:
-        columns = np.zeros((max_length+1, len(data.ALPHABET)+2))
-        columns[0, data.START_MARKER] = 1 #start marker
-        #columns[1:(HEADSTART+1)] = input_dict["in_columns"][1:(HEADSTART+1)]
-        for i in range(max_length):
-            inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
-            out_col, A = model(inp, training=False)
-            #print(out_col.shape)
-            #print(A.shape)
-            #residues = np.argmax(A[:,-1,:], axis=-1)
-            #last_column = np.sum(sequences[np.arange(sequences.shape[0]), residues], axis=0) / sequences.shape[0]
-            #print(residues, last_column)
-            last_column = out_col[-1,:].numpy()
-            #print(residues)
-            #print(A[:,-1,:])
-            #print(last_column)
-            marker = np.argmax(last_column)
-            if marker == data.END_MARKER:
-                return columns[:(i+1)], A
-            else:
-                columns[i+1] = last_column
-        return columns[:(i+1)], A
-    else:
-        alen = int(1.1*sequences.shape[1])
-        columns = np.zeros((alen, len(data.ALPHABET)+3))
-        inp = {"sequences" : sequences, "in_columns" : columns}
-        return neuroalign(inp, training=False)
+def gen_columns(sequences, seq_lens, model, model_config, max_length=1000):
+    
+    columns = np.zeros((max_length+1, len(data.ALPHABET)+2))
+    columns[0, data.START_MARKER] = 1 #start marker
+    A = np.zeros((tf.shape(sequences)[0], tf.shape(sequences)[1], max_length))
+    indices = np.ones(tf.shape(sequences)[0], dtype=int)
+    
+    for i in range(max_length):
+        inp = {"sequences" : sequences, "in_columns" : columns[:(i+1)]}
+        out_gaps = model(inp, training=False)
+        print(out_gaps[:,-1])
+        advance = np.logical_and(out_gaps[:,-1] < 0.5, indices < seq_lens)
+        print(advance)
+        if np.all(np.logical_not(advance)):
+            return A[:,:,:i]
+        A[advance, indices[advance], i] = 1
+        next_column = np.sum(sequences[advance, indices[advance]], axis=0) / np.sum(advance)
+        indices += advance
+        if np.all(indices >= seq_lens):
+            return A[:,:,:(i+1)]
+        else:
+            columns[i+1] = next_column
+    return A
