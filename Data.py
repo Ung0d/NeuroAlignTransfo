@@ -209,15 +209,20 @@ def get_input_target_data(family_fasta, seqs_drawn,
     in_columns = columns[:-1]
     out_columns = columns[1:]
     
-    gaps = 1 - np.sum(memberships, axis=2)
-    gaps = np.concatenate([gaps, np.ones((gaps.shape[0],1))], axis=-1)
+    gaps = np.zeros((tf.shape(memberships)[0], tf.shape(memberships)[1]+2, 4))
+    gaps[:, 1:-1, 0] = 1 - np.sum(memberships, axis=2)
+    gaps[:, 1:-1, 1] = np.sum(memberships, axis=2)
+    gaps[:, 0, 2] = 1 #start marker
+    gaps[:, -1, 3] = 1 #end marker
+    in_gaps = gaps[:,:-1,:]
+    out_gaps = gaps[:,1:,:]
     
     input_dict = {  ext+"sequences" : seq,
-                    ext+"in_columns" : in_columns }
+                    ext+"in_gaps" : in_gaps }
         
     target_dict = { #ext+"out_columns" : out_columns,
                     #ext+"out_attention" : memberships,
-                    ext+"out_gaps" : gaps }
+                    ext+"out_gaps" : out_gaps }
         
     return input_dict, target_dict
 

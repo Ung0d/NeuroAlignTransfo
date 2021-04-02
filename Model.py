@@ -58,12 +58,10 @@ def make_dynamic_colinear_mask(A, mask):
 #we use scaled dot product attention for efficiency
 class MultiHeadAttention(layers.Layer):
     
-    def __init__(self, dim, heads, colinear=False, only_attention=False):
+    def __init__(self, dim, heads, keep_heads=False):
         super(MultiHeadAttention, self).__init__()
         self.heads = heads
         self.dim = dim
-        self.colinear = colinear
-        self.only_attention = only_attention
 
         assert dim % heads == 0
 
@@ -72,8 +70,10 @@ class MultiHeadAttention(layers.Layer):
         self.wq = layers.Dense(dim)
         self.wk = layers.Dense(dim)
         self.wv = layers.Dense(dim)
-
-        self.dense = layers.Dense(dim)
+        
+        self.keep_heads = keep_heads
+        if not self.keep_heads:
+            self.dense = layers.Dense(dim)
         self.SCALE = 1e4
         
         
@@ -88,10 +88,6 @@ class MultiHeadAttention(layers.Layer):
         if mask != None:
             QK += ((1-mask) * -1e9)  #masked positions will be close to zero after softmaxing
         A = tf.nn.softmax(QK, axis=-1)  
-        if self.colinear:
-            A *= make_dynamic_colinear_mask(A, mask)
-        if self.only_attention:
-            return QK
         out = tf.matmul(A, values)  #(...,Q,D2)
         return out, QK
     
@@ -113,20 +109,19 @@ class MultiHeadAttention(layers.Layer):
         #linear transform such that last dimensions fit
         query = self.wq(query)  
         keys = self.wk(keys) 
-        if not self.only_attention:
-            values = self.wv(values) 
+        values = self.wv(values) 
         
         #instead of a single attention over the whole model dimension, we
         #split dimensions to multiple heads to allow for different attention contexts
         query = self.split_heads(query, batch_size)  
         keys = self.split_heads(keys, batch_size) 
-        if not self.only_attention: 
-            values = self.split_heads(values, batch_size) 
+        values = self.split_heads(values, batch_size) 
         
-        if self.only_attention:
-            return self.scaled_dot_product_attention(query, keys, values, mask)
+        out, A = self.scaled_dot_product_attention(query, keys, values, mask)
+        
+        if self.keep_heads:
+            return out, A
         else:
-            out, A = self.scaled_dot_product_attention(query, keys, values, mask)
             #transpose back and reshape to original form
             out = tf.transpose(out, perm=[0, 2, 1, 3])  
             out = tf.reshape(out, (batch_size, -1, self.dim))  
@@ -147,16 +142,23 @@ class MultiHeadAttention(layers.Layer):
 # transformers. The LSTMs can also learn other important residual level features like secondary structure.
 #
 class EmbeddingAndPositionalEncoding(layers.Layer):
-    def __init__(self, input_dim, embedding_dim, num_lstm, dropout):
+    def __init__(self, input_dim, embedding_dim, num_lstm, dropout, use_bidirectional_lstm, use_gap_dummy):
         super(EmbeddingAndPositionalEncoding, self).__init__()
         self.matrix = self.add_weight(shape=(input_dim, embedding_dim),
                                         name='embedding', initializer="uniform", trainable=True)
-        self.gap_dummy = self.add_weight(shape=(1,1,embedding_dim),
-                                        name='gap_dummy', initializer="uniform", trainable=True)
+        self.use_gap_dummy = use_gap_dummy
+        if use_gap_dummy:
+            self.gap_dummy = self.add_weight(shape=(1,1,embedding_dim),
+                                            name='gap_dummy', initializer="uniform", trainable=True)
         self.masking = layers.Masking()
-        self.forward_lstm = []
+        self.lstm = []
         for i in range(num_lstm):
-            self.forward_lstm.append(layers.LSTM(embedding_dim, return_sequences=True))
+            if use_bidirectional_lstm:
+                forward_lstm = layers.LSTM(embedding_dim, return_sequences=True)
+                backward_lstm = layers.LSTM(embedding_dim, return_sequences=True, go_backwards=True)
+                self.lstm.append(layers.Bidirectional(forward_lstm, backward_layer=backward_lstm, merge_mode="sum"))
+            else:
+                self.lstm.append(layers.LSTM(embedding_dim, return_sequences=True))
         self.dropout = layers.Dropout(dropout)
         self.layernorm = layers.LayerNormalization(epsilon=1e-6)
     
@@ -164,19 +166,20 @@ class EmbeddingAndPositionalEncoding(layers.Layer):
     # if use_gap_dummy == true, a shared gap dummy embedding is appended at the front of each sequence after positional encoding 
     # (i.e. the gap is positionless, it functions as a dummy to allow columns to attent to something in the sequence, if
     # to no amino acid)
-    def call(self, x, training, use_gap_dummy):
+    def call(self, x, training):
         
         #embedding
         x_emb = tf.matmul(x, self.matrix)
-        x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the Transformer paper #XXXXX
+       #x_emb *= tf.math.sqrt(tf.cast(tf.shape(x)[-1], tf.float32)) #not sure why they do this in the Transformer paper #XXXXX
+        #I think this is only relevant when sharing the embedding matrix with output
         
         #encoding
         x = self.masking(x)
-        for lstm in self.forward_lstm:
+        for lstm in self.lstm:
             x = lstm(x)
         x = self.dropout(x, training=training)
         x = self.layernorm(x + x_emb)
-        if use_gap_dummy:
+        if self.use_gap_dummy:
             seq_num = tf.shape(x)[0]
             #XXXXX probably want to scale the gap embedding like above
             x = tf.concat([tf.repeat(self.gap_dummy, seq_num, axis=0), x], axis=1)
@@ -235,16 +238,41 @@ class DecoderLayer(layers.Layer):
     
     def __init__(self, dim, heads, dim_ff, dropout=0.1):
         super(DecoderLayer, self).__init__()
+        self.dim = dim
+        self.heads = heads
         self.target_attention = MultiHeadAttention(dim, heads)
-        self.input_to_target_attention = MultiHeadAttention(dim, heads) 
+        self.input_to_target_attention = MultiHeadAttention(dim, heads, keep_heads=True) 
         self.ffn = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
         self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
         self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
         self.layernorm3 = layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm4 = layers.LayerNormalization(epsilon=1e-6)
         self.dropout1 = layers.Dropout(dropout)
         self.dropout2 = layers.Dropout(dropout)
         self.dropout3 = layers.Dropout(dropout)
+        self.dropout4 = layers.Dropout(dropout)
+               
+        self.ffn_update = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
+        self.dense = layers.Dense(dim)
 
+    
+    # Updates C via message passing and aggregations to
+    # allow intersequencial and global information flow
+    def message_and_aggregate(self, X, training):
+        
+        #compute a message per attention head
+        X_aggr = tf.reduce_sum(X, axis=0, keepdims=True) - X # does not change shape
+       
+        X = tf.transpose(X, perm=[0, 2, 1, 3])  
+        X = tf.reshape(X, (tf.shape(X)[0], tf.shape(X)[1], self.dim))  
+        X = self.dense(X)
+        X = tf.expand_dims(X, 1)
+        X = tf.repeat(X, axis=1, repeats=self.heads)
+        
+        C_upd = self.ffn_update(tf.concat([X, X_aggr], axis=-1))
+        C_upd = tf.reduce_mean(C_upd, axis=1)
+        return C_upd
+    
 
     def call(self, 
              x, #(B, L1, D1)
@@ -260,6 +288,7 @@ class DecoderLayer(layers.Layer):
 
         #input to targets attention, norm and skip connect
         x_attn2, A = self.input_to_target_attention(x_norm1, enc_input, enc_input, padding_mask)
+        x_attn2 = self.message_and_aggregate(x_attn2, training)
         x_attn2 = self.dropout2(x_attn2, training=training)
         x_norm2 = self.layernorm2(x_norm1 + x_attn2)
 
@@ -281,59 +310,18 @@ class ColDecoder(layers.Layer):
         self.dim = dim
         self.iterations = iterations
         self.aggregation_iterations = aggregation_iterations
-        
-        self.ffn_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )        
-        self.ffn_sequence_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
-        self.ffn_global_message = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
-        self.ffn_update = keras.Sequential( [layers.Dense(dim_ff, activation="relu"), layers.Dense(dim),] )
-        
-        self.layernorm = layers.LayerNormalization(epsilon=1e-6)
-        self.dropout = layers.Dropout(dropout)
         self.dec_layers = [DecoderLayer(dim, heads, dim_ff, dropout) 
                            for _ in range(iterations*aggregation_iterations-1)] + [DecoderLayer(dim, heads, dim_ff, dropout)]
-    
-    # Updates C via message passing and aggregations to
-    # allow intersequencial and global information flow
-    def message_and_aggregate(self, C, sequence_summary):
-        
-        num_seq = tf.shape(C)[0]
-        num_col = tf.shape(C)[1]
-        
-        C_message = self.ffn_message(C)
-        C_message = tf.reduce_sum(C_message, axis=0, keepdims=True) - C_message
-        
-        #global summary of the alignment up to column l
-        global_summary = self.ffn_global_message(C)
-        global_summary = tf.math.cumsum(global_summary, axis=1)
-        global_summary /= tf.cast(tf.reshape(tf.range(1, num_col+1), (1,-1,1)), dtype=C.dtype)
-        global_summary = tf.reduce_sum(global_summary, axis=0, keepdims=True)
-        global_summary = tf.tile(global_summary, [num_seq, 1, 1])
-        
-        C = self.ffn_update(tf.concat([C, C_message, sequence_summary, global_summary], axis=-1))
-        C = self.dropout(C)
-        C = self.layernorm(C)
-        return C
         
 
     def call(self, C, S, training, 
            look_ahead_mask, padding_mask):
         
-        num_seq = tf.shape(S)[0]
-        num_col = tf.shape(C)[1]
-        
-        #global summary of each sequence
-        sequence_summary = self.ffn_sequence_message(S)
-        sequence_summary = tf.reduce_sum(sequence_summary * tf.reshape(padding_mask, (num_seq,-1,1)), 
-                                         axis=1, keepdims=True)
-        sequence_summary = tf.tile(sequence_summary, [1, num_col, 1])
-        
-        C = tf.repeat(C, repeats = num_seq, axis=0)
         for i in range(self.aggregation_iterations):
             for j in range(self.iterations):
                 layer = self.dec_layers[i*self.iterations + j]
                 C, A = layer(C, S, look_ahead_mask, padding_mask,training)
-            C = self.message_and_aggregate(C, sequence_summary)
-            
+        
         return C, A
 
 ##################################################################################################
@@ -345,7 +333,18 @@ class NeuroAlignLayer(layers.Layer):
         super(NeuroAlignLayer, self).__init__()
         
         self.config = config
-        self.embedding = EmbeddingAndPositionalEncoding(in_dim, config["seq_dim"], config["num_lstm"], config["dropout"])
+        self.embedding = EmbeddingAndPositionalEncoding(in_dim, 
+                                                        config["seq_dim"], 
+                                                        config["num_lstm"], 
+                                                        config["dropout"], 
+                                                        use_bidirectional_lstm=True,
+                                                        use_gap_dummy=True)
+        self.tar_embedding = EmbeddingAndPositionalEncoding(4, 
+                                                            config["seq_dim"], 
+                                                            config["num_lstm"], 
+                                                            config["dropout"], 
+                                                            use_bidirectional_lstm=False,
+                                                            use_gap_dummy=False)
         self.encoder = Encoder(config["num_encoder_iterations"], 
                                config["seq_dim"], 
                                config["num_heads"], 
@@ -356,6 +355,7 @@ class NeuroAlignLayer(layers.Layer):
             dec_heads = 1
         else:
             dec_heads = config["num_heads"]
+            
         self.col_decoder = ColDecoder(config["num_decoder_iterations"], 
                                       config["num_aggregation_iterations"], 
                                       config["col_dim"], 
@@ -363,30 +363,29 @@ class NeuroAlignLayer(layers.Layer):
                                       config["dim_ff"], 
                                       config["sequence_aggregation"], 
                                       config["dropout"])
-        self.dense = layers.Dense(1, activation="sigmoid")
+        
 
 
     def call(self, inp, tar, seq_padding_mask, col_look_ahead_mask, training):
         
         num_seq = tf.shape(inp)[0]
         
-        enc_inp = self.embedding(inp, training=training, use_gap_dummy=True)  
+        enc_inp = self.embedding(inp, training=training)  
         self_inp = self.encoder(enc_inp, training, seq_padding_mask) 
         
-        enc_tar = self.embedding(tar, training=training, use_gap_dummy=False) 
-        self_tar = self.encoder(enc_tar, training, col_look_ahead_mask) 
-            
-        out_cols, out_attention = self.col_decoder(self_tar, self_inp, training, col_look_ahead_mask, seq_padding_mask)
+        enc_tar = self.tar_embedding(tar, training=training) 
+        
+        out_cols, out_attention = self.col_decoder(enc_tar, self_inp, training, col_look_ahead_mask, seq_padding_mask)
         #out_cols = tf.squeeze(out_cols, 0)
         
         # share the alphabet-embedding matrix for input/output
         # see paper: Using the output embedding to improve language models, Ofir Press and Lior Wolf, 2016
-        #out_cols = tf.matmul(out_cols, self.embedding.matrix, transpose_b = True)
+        out_cols = tf.matmul(out_cols, self.tar_embedding.matrix, transpose_b = True)
         
-        #out_cols = tf.nn.softmax(out_cols, axis=-1)
+        out_cols = tf.nn.softmax(out_cols, axis=-1)
         
-        out_cols = self.dense(out_cols)
-        out_cols = tf.squeeze(out_cols, -1)
+        #out_cols = self.dense(out_cols)
+        #out_cols = tf.squeeze(out_cols, -1)
         
         #out_attention = tf.squeeze(out_attention, 1)
         #out_attention = tf.transpose(out_attention, perm=[0,2,1])
@@ -424,7 +423,7 @@ def make_neuro_align_model(identifier):
     
     #inputs
     sequences = keras.Input(shape=(None,INPUT_DIM), name="sequences")
-    columns = keras.Input(shape=(INPUT_DIM), name="in_columns")  
+    in_gaps = keras.Input(shape=(None,4), name="in_gaps")  
     num_seq = tf.shape(sequences)[0]
     
     #layers
@@ -436,18 +435,18 @@ def make_neuro_align_model(identifier):
     #append ones to account for the gap dummy which is concatenated later
     seq_padding_mask = make_padding_mask(tf.concat([tf.ones((num_seq,1,tf.shape(sequences)[-1])),
                                         sequences], axis=1))
-    col_look_ahead_mask = make_look_ahead_mask(columns)
+    col_look_ahead_mask = make_look_ahead_mask(in_gaps)
     
-    columns_ = tf.expand_dims(columns, 0)
+    #in_gaps_ = tf.expand_dims(in_gaps, 0)
     
     #compute output
-    out_cols, A = NR(sequences, columns_, seq_padding_mask, col_look_ahead_mask)
+    out_gaps, A = NR(sequences, in_gaps, seq_padding_mask, col_look_ahead_mask)
     
     #instantiate the model
     outputs = []
-    outputs.append(layers.Lambda(lambda x: x, name="out_gaps")(out_cols)) #lambda identity used for renaming
+    outputs.append(layers.Lambda(lambda x: x, name="out_gaps")(out_gaps)) #lambda identity used for renaming
     #outputs.append(layers.Lambda(lambda x: x, name="out_attention")(A))
-    model = keras.Model(inputs=[sequences, columns], outputs=outputs)
+    model = keras.Model(inputs=[sequences, in_gaps], outputs=outputs)
     
     checkpoint_path = "./models/"+identifier+"/model.ckpt"
     if os.path.isfile(checkpoint_path+".index"):

@@ -56,8 +56,15 @@ dirichlet["dim_ff"] = 128
 dirichlet["num_heads"] = 4
 dirichlet["num_lstm"] = 1
 
-gap_prob = dict(dirichlet)
-gap_prob["dropout"] = 0.1
+gap_prob = dict(base_model)
+gap_prob["dropout"] = 0.0
+gap_prob["seq_dim"] = 64
+gap_prob["col_dim"] = 64
+gap_prob["dim_ff"] = 128
+gap_prob["num_encoder_iterations"] = 2
+gap_prob["num_aggregation_iterations"] = 2
+gap_prob["num_heads"] = 4
+gap_prob["num_lstm"] = 1
 gap_prob["sequence_aggregation"] = tf.reduce_sum
 
 
