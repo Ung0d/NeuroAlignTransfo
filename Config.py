@@ -3,13 +3,13 @@ import tensorflow as tf
 base_model = {
     
     #dimensionality of the latent representation for each residuum
-    "seq_dim" : 128,
+    "seq_dim" : 512,
     
     #dimensionality of the latent representation for each column
-    "col_dim" : 128,
+    "col_dim" : 512,
     
     #dimensionality of all feed forward layers
-    "dim_ff" : 256,
+    "dim_ff" : 1024,
     
     #multi head attention; applies to all attention mechanisms except the last 
     #sequence-to-columns steps, where the number of heads is fixed to 1
@@ -21,15 +21,15 @@ base_model = {
     "num_lstm" : 2,
     
     #how many self attention layers for both sequences and columns
-    "num_encoder_iterations" : 3,
+    "num_encoder_iterations" : 6,
     
     #how many self attention layers for the columns without an aggregation inbetween
     "num_decoder_iterations" : 1,
     
     #how many aggregations
-    "num_aggregation_iterations" : 3,
+    "num_aggregation_iterations" : 6,
 
-    "dropout" : 0.1,
+    "dropout" : 0.0,
     
     "sequence_aggregation" : tf.reduce_mean,
 

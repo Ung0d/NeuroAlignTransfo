@@ -21,7 +21,7 @@ else:
     
     
 NUM_EPOCHS = 200
-NAME = "base2"
+NAME = "base"
 MODEL_PATH = "./models/" + NAME
 CHECKPOINT_PATH = MODEL_PATH + "/model.ckpt"
 
@@ -36,7 +36,7 @@ neuroalign, neuroalign_config = model.make_neuro_align_model(NAME)
 #The largest id is PF19227, but the counting is not contiguous, there may be missing numbers
 pfam = ["PF"+"{0:0=5d}".format(i) for i in range(1,19228)]
 pfam_not_found = 0
-#pfam = pfam[:1]
+
 fasta = []
 
 for i,file in enumerate(pfam):
@@ -65,11 +65,13 @@ else:
     train_gen = data.AlignmentSampleGenerator(np.arange(len(fasta)), fasta, neuroalign_config, neuroalign_config["family_size"], NUM_DEVICES)
     val_gen = data.AlignmentSampleGenerator(np.arange(len(fasta)), fasta, neuroalign_config, 2*neuroalign_config["family_size"], NUM_DEVICES, False) 
     
-INPUT_DIM = 28
+    
+    
+    
+INPUT_DIM = 27
 
-COLUMN_LOSS_WEIGHT = 0.2
-ATTENTION_LOSS_WEIGHT = 0.8
-SEQUENCE_LOSS_WEIGHT = 1
+#COLUMN_LOSS_WEIGHT = 0.02
+#ATTENTION_LOSS_WEIGHT = 0.98
 
 ##################################################################################################
 ##################################################################################################
@@ -92,7 +94,7 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 ##################################################################################################
 ##################################################################################################
 
-optimizer = tf.keras.optimizers.Adam(8e-4, beta_1=0.9, beta_2=0.98, 
+optimizer = tf.keras.optimizers.Adam(1e-4, beta_1=0.9, beta_2=0.98, 
                                      epsilon=1e-9)
 
 ##################################################################################################
@@ -100,14 +102,17 @@ optimizer = tf.keras.optimizers.Adam(8e-4, beta_1=0.9, beta_2=0.98,
 
 
 def losses_prefixed(losses, metrics, weights, prefix=""):
-    if neuroalign_config["use_column_loss"]:
-        losses.update({prefix+"out_columns" : eval.kld})
-        metrics.update({prefix+"out_columns" : "categorical_accuracy"})
-        weights.update({prefix+"out_columns" : COLUMN_LOSS_WEIGHT})
-    if neuroalign_config["use_attention_loss"]:
-        losses.update({prefix+"out_attention" : "categorical_crossentropy"})
-        metrics.update({prefix+"out_attention" : [eval.precision, eval.recall]})
-        weights.update({prefix+"out_attention" : ATTENTION_LOSS_WEIGHT})
+    #if neuroalign_config["use_column_loss"]:
+        #losses.update({prefix+"out_columns" : eval.kld})
+        #weights.update({prefix+"out_columns" : COLUMN_LOSS_WEIGHT})
+    #if neuroalign_config["use_attention_loss"]:
+        #losses.update({prefix+"out_attention" : eval.att_loss})
+        #metrics.update({prefix+"out_attention" : [eval.precision, eval.recall]})
+        #weights.update({prefix+"out_attention" : ATTENTION_LOSS_WEIGHT})
+    losses.update({prefix+"out_gaps" : 
+                   keras.losses.CategoricalCrossentropy(
+                       label_smoothing=0.1)})
+    metrics.update({prefix+"out_gaps" : keras.metrics.CategoricalAccuracy()})
         
 
 losses, metrics, weights = {}, {}, {}
@@ -119,13 +124,14 @@ else:
     for i, gpu in enumerate(GPUS):
         with tf.device(gpu.name):
             sequences = keras.Input(shape=(None,INPUT_DIM), name="GPU_"+str(i)+"_sequences")
-            columns = keras.Input(shape=(INPUT_DIM), name="GPU_"+str(i)+"_in_columns")
+            in_gaps = keras.Input(shape=(None,4), name="GPU_"+str(i)+"_in_gaps")
             input_dict = {  "sequences" : sequences,
-                            "in_columns" : columns }
-            out_cols, A = neuroalign(input_dict)
-            outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_columns")(out_cols))
-            outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_attention")(A))
-            inputs.extend([sequences, columns])
+                            "in_gaps" : in_gaps }
+            #out_cols, A = neuroalign(input_dict)
+            out_gaps = neuroalign(input_dict)
+            outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_gaps")(out_gaps))
+            #outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_attention")(A))
+            inputs.extend([sequences, in_gaps])
 
     model = keras.Model(inputs=inputs, outputs=outputs)
     for i, gpu in enumerate(GPUS):
