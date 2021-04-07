@@ -16,6 +16,7 @@ ALPHABET = ['A', 'R',  'N',  'D',  'C',  'Q',  'E',  'G',  'H', 'I',  'L',  'K',
 
 START_MARKER = len(ALPHABET)
 END_MARKER = len(ALPHABET)+1
+GAP_MARKER = len(ALPHABET)+2
 
 ##################################################################################################
 ##################################################################################################
@@ -122,7 +123,7 @@ class Fasta:
         alphabet_size = len(ALPHABET)
         if append_markers:
             maxlen += 2
-            alphabet_size += 2
+            alphabet_size += 3
         seq = np.zeros((num_seqs, maxlen, alphabet_size), dtype=np.float32)
         for j,(l,si) in enumerate(zip(lens, subset)):
             lrange = np.arange(l)
@@ -199,26 +200,54 @@ def get_input_target_data(family_fasta, seqs_drawn,
                           model_config,
                           ext = ""):
      
-    seq = family_fasta.one_hot_sequences(subset = seqs_drawn)
+    seq = family_fasta.one_hot_sequences(append_markers = True, subset = seqs_drawn)
     memberships, target_subset = family_fasta.column_memberships(subset = seqs_drawn)
     
-    columns = np.zeros((memberships.shape[1]+2, len(ALPHABET)+2))
-    columns[1:-1, :len(ALPHABET)] = family_fasta.columns[target_subset]
-    columns[0, START_MARKER] = 1
-    columns[-1, END_MARKER] = 1
-    in_columns = columns[:-1]
-    out_columns = columns[1:]
+    aligned_seq = np.matmul(memberships, seq[:,1:-1])
+    gap_positions = np.all(aligned_seq == 0, axis=-1)
+    aligned_seq[gap_positions, GAP_MARKER] = 1
+    start_markers = np.zeros((aligned_seq.shape[0], 1, aligned_seq.shape[-1]))
+    start_markers[:,0,START_MARKER] = 1
+    aligned_seq = np.concatenate([start_markers, aligned_seq], axis=1)
+    
+    # memberships[..., :, :] = [[1,0], [0,0], [0,1]]
+    # i.e. 3 columns and a sequence of length 2, with a gap inbetween the 2 residues
+    # (second column has no member from the sequence)
+    # the residual mask is:
+    # [[0,1], [0,1], [0,0]]
+    flip_mem = np.flip(memberships, axis=-1)
+    sequences_residual_mask = np.flip(np.cumsum(flip_mem, axis=-1) - flip_mem, axis=-1) #exclusive reverse cumsum
+    sequences_residual_mask = np.cumsum(sequences_residual_mask, axis=-2)
+    sequences_residual_mask = 1 - np.clip(sequences_residual_mask, 0, 1)
+    end_marker_cumsum = sequences_residual_mask[:, -1].copy()
+    #end_marker_cumsum = np.roll(end_marker_cumsum, axis=-1, shift=1)
+    #end_marker_cumsum[:,0] = 0
+    end_marker_cumsum = np.expand_dims(end_marker_cumsum, 1)
+    sequences_residual_mask = np.concatenate([sequences_residual_mask, end_marker_cumsum], axis=1)
+    sequences_residual_mask = np.concatenate([np.zeros((sequences_residual_mask.shape[0], sequences_residual_mask.shape[1], 1)),
+                                              sequences_residual_mask], axis=-1)
+    sequences_residual_mask = np.concatenate([sequences_residual_mask,
+                                             np.ones((sequences_residual_mask.shape[0], sequences_residual_mask.shape[1], 1)),
+                                             ], axis=-1)
+    
+    #columns = np.zeros((memberships.shape[1]+2, len(ALPHABET)+2))
+    #columns[1:-1, :len(ALPHABET)] = family_fasta.columns[target_subset]
+    #columns[0, START_MARKER] = 1
+    #columns[-1, END_MARKER] = 1
+    #in_columns = columns[:-1]
+    #out_columns = columns[1:]
     
     gaps = np.zeros((tf.shape(memberships)[0], tf.shape(memberships)[1]+2, 4))
     gaps[:, 1:-1, 0] = 1 - np.sum(memberships, axis=2)
     gaps[:, 1:-1, 1] = np.sum(memberships, axis=2)
     gaps[:, 0, 2] = 1 #start marker
     gaps[:, -1, 3] = 1 #end marker
-    in_gaps = gaps[:,:-1,:]
-    out_gaps = gaps[:,1:,:]
+    #in_gaps = gaps[:,:-1]
+    out_gaps = gaps[:,1:]
     
     input_dict = {  ext+"sequences" : seq,
-                    ext+"in_gaps" : in_gaps }
+                    ext+"aligned_sequences" : aligned_seq,
+                    ext+"sequences_residual_mask" : sequences_residual_mask}
         
     target_dict = { #ext+"out_columns" : out_columns,
                     #ext+"out_attention" : memberships,
