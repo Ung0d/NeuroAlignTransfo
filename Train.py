@@ -21,7 +21,7 @@ else:
     
     
 NUM_EPOCHS = 200
-NAME = "base"
+NAME = "gap_prob"
 MODEL_PATH = "./models/" + NAME
 CHECKPOINT_PATH = MODEL_PATH + "/model.ckpt"
 
@@ -68,8 +68,6 @@ else:
     
     
     
-INPUT_DIM = 27
-
 #COLUMN_LOSS_WEIGHT = 0.02
 #ATTENTION_LOSS_WEIGHT = 0.98
 
@@ -123,15 +121,17 @@ else:
     inputs, outputs = [], []
     for i, gpu in enumerate(GPUS):
         with tf.device(gpu.name):
-            sequences = keras.Input(shape=(None,INPUT_DIM), name="GPU_"+str(i)+"_sequences")
-            in_gaps = keras.Input(shape=(None,4), name="GPU_"+str(i)+"_in_gaps")
+            sequences = keras.Input(shape=(None,model.INPUT_DIM), name="GPU_"+str(i)+"_sequences")
+            aligned_sequences = keras.Input(shape=(None,model.INPUT_DIM), name="GPU_"+str(i)+"_aligned_sequences")
+            sequences_residual_mask = keras.Input(shape=(None,None), name="GPU_"+str(i)+"_sequences_residual_mask")
             input_dict = {  "sequences" : sequences,
-                            "in_gaps" : in_gaps }
+                            "aligned_sequences" : aligned_sequences,
+                            "sequences_residual_mask" : sequences_residual_mask }
             #out_cols, A = neuroalign(input_dict)
             out_gaps = neuroalign(input_dict)
             outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_gaps")(out_gaps))
             #outputs.append(layers.Lambda(lambda x: x, name="GPU_"+str(i)+"_out_attention")(A))
-            inputs.extend([sequences, in_gaps])
+            inputs.extend([sequences, aligned_sequences, sequences_residual_mask])
 
     model = keras.Model(inputs=inputs, outputs=outputs)
     for i, gpu in enumerate(GPUS):
