@@ -52,7 +52,7 @@ dirichlet["seq_dim"] = 128
 dirichlet["col_dim"] = 128
 dirichlet["dim_ff"] = 256
 dirichlet["num_heads"] = 8
-dirichlet["num_lstm"] = 2
+dirichlet["num_lstm"] = 1
 
 gap_prob = dict(dirichlet)
 gap_prob["dropout"] = 0.05
@@ -61,8 +61,8 @@ gap_prob["seq_dim"] = 256
 gap_prob["col_dim"] = 256
 gap_prob["dim_ff"] = 512
 gap_prob["family_size"] = 4000
-gap_prob["num_encoder_iterations"] = 4
-gap_prob["num_decoder_iterations"] = 4
+gap_prob["num_encoder_iterations"] = 3
+gap_prob["num_decoder_iterations"] = 3
 
 
 cross_transfo = dict(gap_prob)
